@@ -66,7 +66,7 @@ command line tool for Vaultwarden. The owner pushes to GitHub; don't push.
 ## Build and test
 
 ```sh
-make build VERSION=x.y.z   # static stripped binary -> bin/bw (~10 MB)
+make build                 # static stripped binary -> bin/bw (~8 MB)
 make test                  # go vet + unit tests
 make integration           # podman/docker, pulls docker.io/vaultwarden/server
 go vet -tags integration ./integration   # integration code isn't vetted by `make test`

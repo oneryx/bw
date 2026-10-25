@@ -1,5 +1,4 @@
-VERSION ?= dev
-LDFLAGS := -s -w -X github.com/oneryx/bw/internal/cli.Version=$(VERSION)
+LDFLAGS := -s -w
 
 .PHONY: build test integration clean
 

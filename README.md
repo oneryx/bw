@@ -18,7 +18,7 @@ for older server APIs have been removed.
 ## Build
 
 ```sh
-make build VERSION=0.1.0    # CGO_ENABLED=0, stripped -> bin/bw
+make build                  # CGO_ENABLED=0, stripped -> bin/bw
 make test                   # go vet + unit tests
 make integration            # end-to-end tests in a throwaway Vaultwarden container (podman/docker)
 ```

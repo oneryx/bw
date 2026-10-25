@@ -12,9 +12,6 @@ import (
 	"github.com/oneryx/bw/internal/output"
 )
 
-// Version is set at build time with -ldflags "-X github.com/oneryx/bw/internal/cli.Version=...".
-var Version = "dev"
-
 // App carries per-invocation state shared by all commands.
 type App struct {
 	opts          output.Options
@@ -50,7 +47,6 @@ func (a *App) newRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:               "bw",
 		Short:             "Bitwarden CLI (Go implementation for Vaultwarden)",
-		Version:           Version,
 		SilenceErrors:     true,
 		SilenceUsage:      true,
 		CompletionOptions: cobra.CompletionOptions{DisableDefaultCmd: true},
@@ -68,8 +64,6 @@ func (a *App) newRootCmd() *cobra.Command {
 			return nil
 		},
 	}
-	root.SetVersionTemplate("{{.Version}}\n")
-	root.Flags().BoolP("version", "v", false, "output the version number")
 
 	pf := root.PersistentFlags()
 	pf.Bool("pretty", false, "Format output. JSON is tabbed with two spaces.")
