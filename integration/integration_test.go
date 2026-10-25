@@ -10,6 +10,7 @@
 package integration
 
 import (
+	"archive/zip"
 	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -321,6 +322,22 @@ func TestAttachments(t *testing.T) {
 	c.ok("sync")
 	if got := c.ok("get", "attachment", "hello.txt", "--itemid", id, "--raw"); got != content {
 		t.Fatalf("attachment mismatch (%d bytes)", len(got))
+	}
+	c.fail("Not a login.", "get", "password", "Doc")
+
+	file := filepath.Join(t.TempDir(), "vault.zip")
+	c.ok("export", "--format", "zip", "--output", file)
+	zr, err := zip.OpenReader(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zr.Close()
+	var got []string
+	for _, f := range zr.File {
+		got = append(got, f.Name)
+	}
+	if want := "data.json,attachments/,attachments/Doc/hello.txt"; strings.Join(got, ",") != want {
+		t.Fatalf("zip entries %v, want %s", got, want)
 	}
 }
 

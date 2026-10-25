@@ -1,7 +1,9 @@
-package vault
+package output
 
 import (
 	"time"
+
+	"github.com/oneryx/bw/vault"
 )
 
 // JSDate converts a server timestamp to JavaScript Date.toJSON() format
@@ -11,10 +13,14 @@ func JSDate(s string) string {
 	if err != nil {
 		return s
 	}
-	return t.UTC().Format("2006-01-02T15:04:05.000Z")
+	return JSTime(t)
 }
 
-func jsDatePtr(s *string) *string {
+// JSTime formats a time like JavaScript's Date.toJSON().
+func JSTime(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000Z") }
+
+// JSDatePtr is JSDate for optional values.
+func JSDatePtr(s *string) *string {
 	if s == nil {
 		return nil
 	}
@@ -22,8 +28,8 @@ func jsDatePtr(s *string) *string {
 	return &d
 }
 
-// The response structs below reproduce the official CLI JSON key order and
-// its omission of undefined values.
+// The object shapes below reproduce the official CLI JSON key order and its
+// omission of undefined values.
 
 type ItemResponse struct {
 	Type            int                        `json:"type"`
@@ -38,7 +44,7 @@ type ItemResponse struct {
 	Notes           *string                    `json:"notes,omitempty"`
 	Fields          []FieldResponse            `json:"fields"`
 	Login           *LoginResponse             `json:"login,omitempty"`
-	SecureNote      *SecureNote                `json:"secureNote,omitempty"`
+	SecureNote      *vault.SecureNote          `json:"secureNote,omitempty"`
 	Card            *CardResponse              `json:"card,omitempty"`
 	Identity        *IdentityResponse          `json:"identity,omitempty"`
 	SSHKey          *SSHKeyResponse            `json:"sshKey,omitempty"`
@@ -136,15 +142,18 @@ type AttachmentResponse struct {
 	URL      *string `json:"url,omitempty"`
 }
 
-func deref(s *string) string {
+// Deref returns *s, or "" for nil.
+func Deref(s *string) string {
 	if s == nil {
 		return ""
 	}
 	return *s
 }
 
+const fieldHidden = 1
+
 // ItemOutput converts a decrypted cipher into the official CLI item shape.
-func ItemOutput(c *Cipher) ItemResponse {
+func ItemOutput(c *vault.Cipher) ItemResponse {
 	viewPassword := c.ViewPassword == nil || *c.ViewPassword
 	r := ItemResponse{
 		Type:           c.Type,
@@ -158,10 +167,10 @@ func ItemOutput(c *Cipher) ItemResponse {
 		FolderID:       c.FolderID,
 		Notes:          c.Notes,
 		Fields:         []FieldResponse{},
-		CreationDate:   jsDatePtr(c.CreationDate),
+		CreationDate:   JSDatePtr(c.CreationDate),
 		RevisionDate:   JSDate(c.RevisionDate),
-		DeletedDate:    jsDatePtr(c.DeletedDate),
-		ArchivedDate:   jsDatePtr(c.ArchivedDate),
+		DeletedDate:    JSDatePtr(c.DeletedDate),
+		ArchivedDate:   JSDatePtr(c.ArchivedDate),
 		Attachments:    []AttachmentResponse{},
 	}
 	if r.CollectionIDs == nil {
@@ -169,13 +178,13 @@ func ItemOutput(c *Cipher) ItemResponse {
 	}
 	for _, f := range c.Fields {
 		fr := FieldResponse{Type: f.Type, Name: f.Name, Value: f.Value, LinkedID: f.LinkedID}
-		if !viewPassword && f.Type == 1 {
+		if !viewPassword && f.Type == fieldHidden {
 			fr.Value = nil
 		}
 		r.Fields = append(r.Fields, fr)
 	}
 	switch c.Type {
-	case TypeLogin:
+	case vault.TypeLogin:
 		if l := c.Login; l != nil {
 			lr := &LoginResponse{
 				URIs:                 []URIResponse{},
@@ -183,17 +192,17 @@ func ItemOutput(c *Cipher) ItemResponse {
 				Username:             l.Username,
 				Password:             l.Password,
 				Totp:                 l.Totp,
-				PasswordRevisionDate: jsDatePtr(l.PasswordRevisionDate),
+				PasswordRevisionDate: JSDatePtr(l.PasswordRevisionDate),
 			}
 			for _, u := range l.URIs {
 				lr.URIs = append(lr.URIs, URIResponse{URI: u.URI, Match: u.Match})
 			}
 			for _, f := range l.Fido2Credentials {
 				lr.Fido2Credentials = append(lr.Fido2Credentials, Fido2Response{
-					CredentialID: deref(f.CredentialID), KeyType: deref(f.KeyType),
-					KeyAlgorithm: deref(f.KeyAlgorithm), KeyCurve: deref(f.KeyCurve),
-					KeyValue: deref(f.KeyValue), RpID: deref(f.RpID), Counter: deref(f.Counter),
-					Discoverable: deref(f.Discoverable), CreationDate: jsDatePtr(f.CreationDate),
+					CredentialID: Deref(f.CredentialID), KeyType: Deref(f.KeyType),
+					KeyAlgorithm: Deref(f.KeyAlgorithm), KeyCurve: Deref(f.KeyCurve),
+					KeyValue: Deref(f.KeyValue), RpID: Deref(f.RpID), Counter: Deref(f.Counter),
+					Discoverable: Deref(f.Discoverable), CreationDate: JSDatePtr(f.CreationDate),
 					UserHandle: f.UserHandle, UserName: f.UserName, RpName: f.RpName,
 					UserDisplayName: f.UserDisplayName,
 				})
@@ -203,24 +212,25 @@ func ItemOutput(c *Cipher) ItemResponse {
 			}
 			r.Login = lr
 		}
-	case TypeSecureNote:
-		sn := SecureNote{}
+	case vault.TypeSecureNote:
+		sn := vault.SecureNote{}
 		if c.SecureNote != nil {
 			sn = *c.SecureNote
 		}
 		r.SecureNote = &sn
-	case TypeCard:
+	case vault.TypeCard:
 		if cd := c.Card; cd != nil {
-			r.Card = &CardResponse{cd.CardholderName, cd.Brand, cd.Number, cd.ExpMonth, cd.ExpYear, cd.Code}
+			cr := CardResponse(*cd)
+			r.Card = &cr
 		}
-	case TypeIdentity:
+	case vault.TypeIdentity:
 		if id := c.Identity; id != nil {
 			ir := IdentityResponse(*id)
 			r.Identity = &ir
 		}
-	case TypeSSHKey:
+	case vault.TypeSSHKey:
 		if k := c.SSHKey; k != nil {
-			r.SSHKey = &SSHKeyResponse{deref(k.PrivateKey), deref(k.PublicKey), deref(k.KeyFingerprint)}
+			r.SSHKey = &SSHKeyResponse{Deref(k.PrivateKey), Deref(k.PublicKey), Deref(k.KeyFingerprint)}
 		}
 	}
 	if viewPassword {
@@ -245,7 +255,7 @@ type FolderResponse struct {
 	ID     string `json:"id"`
 }
 
-func FolderOutput(f Folder) FolderResponse {
+func FolderOutput(f vault.Folder) FolderResponse {
 	return FolderResponse{Name: f.Name, Object: "folder", ID: f.ID}
 }
 
@@ -261,7 +271,7 @@ type CollectionResponse struct {
 }
 
 // CollectionOutput formats a synced collection (null externalId omitted).
-func CollectionOutput(c Collection) CollectionResponse {
+func CollectionOutput(c vault.Collection) CollectionResponse {
 	r := CollectionResponse{Object: "collection", ID: c.ID, OrganizationID: c.OrganizationID, Name: c.Name}
 	if c.ExternalID != nil {
 		r.ExternalID = *c.ExternalID
@@ -270,27 +280,19 @@ func CollectionOutput(c Collection) CollectionResponse {
 }
 
 // APICollectionOutput formats a collection fetched from the organization API.
-func APICollectionOutput(c Collection) CollectionResponse {
+func APICollectionOutput(c vault.Collection) CollectionResponse {
 	return CollectionResponse{Object: "collection", ID: c.ID, OrganizationID: c.OrganizationID, Name: c.Name, ExternalID: c.ExternalID}
-}
-
-// SelectionReadOnly is a group/user access entry of an org collection.
-type SelectionReadOnly struct {
-	ID            string `json:"id"`
-	ReadOnly      bool   `json:"readOnly"`
-	HidePasswords bool   `json:"hidePasswords"`
-	Manage        bool   `json:"manage"`
 }
 
 // OrgCollectionResponse is the CLI org-collection shape.
 type OrgCollectionResponse struct {
-	Object         string              `json:"object"`
-	ID             string              `json:"id"`
-	OrganizationID string              `json:"organizationId"`
-	Name           string              `json:"name"`
-	ExternalID     *string             `json:"externalId"`
-	Groups         []SelectionReadOnly `json:"groups"`
-	Users          []SelectionReadOnly `json:"users"`
+	Object         string                    `json:"object"`
+	ID             string                    `json:"id"`
+	OrganizationID string                    `json:"organizationId"`
+	Name           string                    `json:"name"`
+	ExternalID     *string                   `json:"externalId"`
+	Groups         []vault.SelectionReadOnly `json:"groups"`
+	Users          []vault.SelectionReadOnly `json:"users"`
 }
 
 // OrganizationResponse is the CLI organization shape.
@@ -303,7 +305,7 @@ type OrganizationResponse struct {
 	Enabled bool   `json:"enabled"`
 }
 
-func OrganizationOutput(o ProfileOrganization) OrganizationResponse {
+func OrganizationOutput(o vault.ProfileOrganization) OrganizationResponse {
 	return OrganizationResponse{Object: "organization", ID: o.ID, Name: o.Name, Status: o.Status, Type: o.Type, Enabled: o.Enabled}
 }
 

@@ -157,15 +157,16 @@ func (a *App) requireUnlocked() (*bw.Client, error) {
 
 // errResp converts a library error into a failed response.
 func errResp(err error) output.Response {
-	if r, ok := err.(*output.Response); ok {
+	var r *output.Response
+	if errors.As(err, &r) {
 		return *r
 	}
-	r := output.Error("%v", err)
+	resp := output.Error("%v", err)
 	var mr *bw.MultipleResultsError
 	if errors.As(err, &mr) {
-		r.Data = mr.IDs
+		resp.Data = mr.IDs
 	}
-	return r
+	return resp
 }
 
 // jsError formats errors thrown as JS Error objects ("Error: msg").

@@ -2,14 +2,12 @@ package bw
 
 import (
 	"context"
-	"encoding/base64"
-	"errors"
 
-	"github.com/oneryx/bw/internal/crypto"
 	"github.com/oneryx/bw/vault"
 )
 
-// Organization member types and statuses.
+// Organization member types (ProfileOrganization.Type, OrgMember.Type) and
+// statuses (ProfileOrganization.Status, OrgMember.Status).
 const (
 	OrgUserOwner   = 0
 	OrgUserAdmin   = 1
@@ -23,6 +21,17 @@ const (
 	OrgMemberConfirmed = 2
 )
 
+// Folders returns the decrypted folders sorted by name.
+func (c *Client) Folders() ([]vault.Folder, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	v, err := c.open()
+	if err != nil {
+		return nil, err
+	}
+	return v.folders(), nil
+}
+
 // Collections returns the decrypted collections the user can access,
 // sorted by name.
 func (c *Client) Collections() ([]vault.Collection, error) {
@@ -32,7 +41,7 @@ func (c *Client) Collections() ([]vault.Collection, error) {
 	if err != nil {
 		return nil, err
 	}
-	return v.Collections(), nil
+	return v.collections(), nil
 }
 
 // Organizations returns the user's organizations sorted by name.
@@ -43,16 +52,7 @@ func (c *Client) Organizations() ([]vault.ProfileOrganization, error) {
 	if err != nil {
 		return nil, err
 	}
-	return v.Organizations(), nil
-}
-
-func findOrg(v *vault.Vault, orgID string) (*vault.ProfileOrganization, error) {
-	for _, o := range v.Data.Profile.Organizations {
-		if o.ID == orgID {
-			return &o, nil
-		}
-	}
-	return nil, ErrOrgNotFound
+	return v.organizations(), nil
 }
 
 // OrgCollections returns all collections of an organization the user can
@@ -64,7 +64,7 @@ func (c *Client) OrgCollections(ctx context.Context, orgID string) ([]vault.Coll
 	if err != nil {
 		return nil, err
 	}
-	org, err := findOrg(v, orgID)
+	org, err := v.findOrg(orgID)
 	if err != nil {
 		return nil, err
 	}
@@ -81,7 +81,7 @@ func (c *Client) OrgCollections(ctx context.Context, orgID string) ([]vault.Coll
 	cols := []vault.Collection{}
 	for _, col := range res.Data {
 		if col.OrganizationID == orgID {
-			col.Name = v.DecryptCollectionName(orgID, col.Name)
+			col.Name = v.collectionName(orgID, col.Name)
 			cols = append(cols, col)
 		}
 	}
@@ -106,8 +106,8 @@ func (c *Client) OrgCollection(ctx context.Context, orgID, id string) (*OrgColle
 	if err != nil {
 		return nil, err
 	}
-	if _, err := v.OrgKey(orgID); err != nil {
-		return nil, ErrNoOrgKey
+	if _, err := v.orgKey(orgID); err != nil {
+		return nil, err
 	}
 	var res struct {
 		vault.Collection
@@ -118,7 +118,7 @@ func (c *Client) OrgCollection(ctx context.Context, orgID, id string) (*OrgColle
 		return nil, err
 	}
 	return &OrgCollection{
-		ID: res.ID, OrganizationID: res.OrganizationID, Name: v.DecryptCollectionName(orgID, res.Name),
+		ID: res.ID, OrganizationID: res.OrganizationID, Name: v.collectionName(orgID, res.Name),
 		ExternalID: res.ExternalID, Groups: res.Groups, Users: res.Users,
 	}, nil
 }
@@ -141,7 +141,7 @@ func (c *Client) OrgMembers(ctx context.Context, orgID string) ([]OrgMember, err
 	if err != nil {
 		return nil, err
 	}
-	if _, err := findOrg(v, orgID); err != nil {
+	if _, err := v.findOrg(orgID); err != nil {
 		return nil, err
 	}
 	var res struct {
@@ -162,44 +162,4 @@ func (c *Client) OrgMembers(ctx context.Context, orgID string) ([]OrgMember, err
 		out = append(out, OrgMember(u))
 	}
 	return out, nil
-}
-
-// Fingerprint returns the fingerprint phrase of a user's public key; use
-// "me" for the current user.
-func (c *Client) Fingerprint(ctx context.Context, userID string) (string, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	v, err := c.open()
-	if err != nil {
-		return "", err
-	}
-	if userID == "me" {
-		pub, err := v.PublicKey()
-		if err != nil {
-			return "", errors.New("No public key available for the active user.")
-		}
-		phrase, err := crypto.Fingerprint(c.st.Account.UserID, pub)
-		if err != nil {
-			return "", ErrNotFound
-		}
-		return phrase, nil
-	}
-	if !IsGUID(userID) {
-		return "", ErrNotFound
-	}
-	var res struct {
-		PublicKey string `json:"publicKey"`
-	}
-	if c.api().Get(ctx, "/users/"+userID+"/public-key", &res) != nil {
-		return "", ErrNotFound
-	}
-	pub, err := base64.StdEncoding.DecodeString(res.PublicKey)
-	if err != nil {
-		return "", ErrNotFound
-	}
-	phrase, err := crypto.Fingerprint(userID, pub)
-	if err != nil {
-		return "", ErrNotFound
-	}
-	return phrase, nil
 }

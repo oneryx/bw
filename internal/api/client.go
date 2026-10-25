@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"mime/multipart"
 	"net/http"
 	"net/url"
 	"runtime"
@@ -71,12 +70,6 @@ type Error struct {
 
 func (e *Error) Error() string { return e.Message }
 
-// IsNotFound reports whether err is a 404 API error.
-func IsNotFound(err error) bool {
-	var ae *Error
-	return errors.As(err, &ae) && ae.Status == http.StatusNotFound
-}
-
 // errorBody covers both the API ErrorResponse and the identity error formats.
 type errorBody struct {
 	Message          string              `json:"message"`
@@ -134,11 +127,14 @@ func (c *Client) checkURL(u string) error {
 	return ErrInsecureURL
 }
 
+// defaultHTTPClient is used when Client.HTTP is nil.
+var defaultHTTPClient = &http.Client{Timeout: 5 * time.Minute}
+
 func (c *Client) httpClient() *http.Client {
 	if c.HTTP != nil {
 		return c.HTTP
 	}
-	return &http.Client{Timeout: 5 * time.Minute}
+	return defaultHTTPClient
 }
 
 func (c *Client) setCommonHeaders(req *http.Request) {
@@ -291,12 +287,8 @@ func (c *Client) send(ctx context.Context, method, u string, body, out any, auth
 	}
 	var rd io.Reader
 	contentType := ""
-	switch b := body.(type) {
-	case nil:
-	case *multipartBody:
-		rd, contentType = bytes.NewReader(b.data), b.contentType
-	default:
-		buf, err := json.Marshal(b)
+	if body != nil {
+		buf, err := json.Marshal(body)
 		if err != nil {
 			return err
 		}
@@ -352,7 +344,7 @@ func (c *Client) Get(ctx context.Context, path string, out any) error {
 	return c.Do(ctx, http.MethodGet, path, nil, out)
 }
 
-// Download fetches an absolute URL (attachments / send files); auth is added
+// Download fetches an absolute URL (attachment files); auth is added
 // only for URLs on the API host.
 func (c *Client) Download(ctx context.Context, u string) ([]byte, error) {
 	if err := c.checkURL(u); err != nil {
@@ -383,57 +375,9 @@ func (c *Client) Download(ctx context.Context, u string) ([]byte, error) {
 	return data, nil
 }
 
-type multipartBody struct {
-	data        []byte
-	contentType string
-}
-
-// Multipart builds a multipart body with string fields and one file part.
-func Multipart(fields map[string]string, fileField, fileName string, file []byte) (any, error) {
-	var buf bytes.Buffer
-	w := multipart.NewWriter(&buf)
-	for k, v := range fields {
-		if err := w.WriteField(k, v); err != nil {
-			return nil, err
-		}
-	}
-	fw, err := w.CreateFormFile(fileField, fileName)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := fw.Write(file); err != nil {
-		return nil, err
-	}
-	if err := w.Close(); err != nil {
-		return nil, err
-	}
-	return &multipartBody{data: buf.Bytes(), contentType: w.FormDataContentType()}, nil
-}
-
-// SendRaw performs an authenticated request to an absolute URL.
-func (c *Client) SendRaw(ctx context.Context, method, u string, body, out any) error {
-	return c.send(ctx, method, u, body, out, true)
-}
-
 // SendAnonymous performs an unauthenticated request against the API base URL.
 func (c *Client) SendAnonymous(ctx context.Context, method, path string, body, out any) error {
 	return c.send(ctx, method, c.Env.APIURL()+path, body, out, false)
-}
-
-// SendIdentity performs an unauthenticated request against the identity base URL.
-// A non-JSON (plain string) response is stored into *string outputs.
-func (c *Client) SendIdentity(ctx context.Context, method, path string, body, out any) error {
-	if sp, ok := out.(*string); ok {
-		var raw json.RawMessage
-		if err := c.send(ctx, method, c.Env.IdentityURL()+path, body, &raw, false); err != nil {
-			return err
-		}
-		if json.Unmarshal(raw, sp) != nil {
-			*sp = string(raw)
-		}
-		return nil
-	}
-	return c.send(ctx, method, c.Env.IdentityURL()+path, body, out, false)
 }
 
 // debugf traces HTTP traffic to Debug (may print secrets).

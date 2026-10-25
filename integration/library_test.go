@@ -14,7 +14,7 @@ import (
 	"github.com/oneryx/bw/totp"
 )
 
-// TestLibrary drives bw.Client directly, the way a GUI client would.
+// TestLibrary drives bw.Client directly, the way another Go program would.
 func TestLibrary(t *testing.T) {
 	ctx := context.Background()
 	const email, password = "lib@example.com", "Lib-Pass-1"

@@ -8,6 +8,8 @@ import (
 	"io"
 	"os"
 	"strings"
+
+	"golang.org/x/term"
 )
 
 // Options are the global output switches (--pretty, --raw, --response, --quiet, --cleanexit).
@@ -180,7 +182,7 @@ func (p *Printer) message(m MessageResponse) *string {
 // writeLn prints a final line; like the official CLI, the trailing newline is
 // omitted when the stream is not a terminal so values can be piped verbatim.
 func writeLn(w io.Writer, s string) {
-	if f, ok := w.(*os.File); ok && isTerminal(f) {
+	if f, ok := w.(*os.File); ok && term.IsTerminal(int(f.Fd())) {
 		fmt.Fprintln(w, s)
 		return
 	}

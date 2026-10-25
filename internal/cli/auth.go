@@ -71,6 +71,8 @@ func (a *App) runLogin(cmd *cobra.Command, args []string) output.Response {
 			return output.Error("client_id is required.")
 		}
 	} else {
+		// The library validates these too; checking here fails before the
+		// password prompt, like the official CLI.
 		if opts.Email == "" && !a.noInteraction {
 			opts.Email = prompt("Email address:")
 		}
@@ -278,7 +280,7 @@ func (a *App) syncCmd() *cobra.Command {
 				if last == nil {
 					return output.Success(output.StringResponse{Object: "string"})
 				}
-				return output.String(jsTime(*last))
+				return output.String(output.JSTime(*last))
 			}
 			if err := c.Sync(context.Background(), boolean(cmd, "force")); err != nil {
 				return output.Error("Syncing failed: %v", err)

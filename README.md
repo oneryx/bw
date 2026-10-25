@@ -10,7 +10,7 @@ follow the official CLI (verified side-by-side against `bw` 2026.10.0 and
 Vaultwarden 1.37), so existing read-only scripts keep working.
 
 The same functionality is available as a Go library (`github.com/oneryx/bw`)
-for other applications, e.g. GUI clients. See [Library](#library).
+for other Go programs, e.g. small command-line tools. See [Library](#library).
 
 Only current Vaultwarden releases are supported (tested with 1.37); fallbacks
 for older server APIs have been removed.
@@ -19,7 +19,7 @@ for older server APIs have been removed.
 
 ```sh
 make build VERSION=0.1.0    # CGO_ENABLED=0, stripped -> bin/bw
-make test                   # unit tests
+make test                   # go vet + unit tests
 make integration            # end-to-end tests in a throwaway Vaultwarden container (podman/docker)
 ```
 
@@ -77,10 +77,8 @@ password instead.
 | `get item` | Get one item by id or search term (fails if the search is ambiguous). | `bw get item <id>`<br>`bw get item github --pretty` |
 | `get username` / `password` / `uri` / `notes` | Get one field of an item. | `bw get password github.com`<br>`bw get username <id>` |
 | `get totp` | Current TOTP code of a login. | `bw get totp github.com` |
-| `get exposed` | How often the item's password appears in known breaches (Have I Been Pwned, k-anonymity). | `bw get exposed github.com` |
 | `get attachment` | Download and decrypt an attachment (by id or file name). | `bw get attachment photo.jpg --itemid <id> --output ./photo.jpg`<br>`bw get attachment <att-id> --itemid <id> --raw > file` |
 | `get folder` / `collection` / `organization` / `org-collection` | Get one object by id or name. | `bw get folder Work`<br>`bw get org-collection <id> --organizationid <org-id>` |
-| `get fingerprint` | Fingerprint phrase of your or another user's public key. | `bw get fingerprint me` |
 
 ### Export
 
@@ -96,11 +94,14 @@ password instead.
 
 ## Differences from the official CLI
 
-Not implemented (not available on Vaultwarden, or not ported yet):
+Not supported, by design (the tool is read-only and targets Vaultwarden):
 
-- `device-approval` (Bitwarden-only), Key Connector, `report password-health`.
 - Anything that changes the vault: `create`, `edit`, `delete`, `move`/`share`,
   `restore`, `archive`, `confirm`, `import`, `encode`, `get template`.
+- `device-approval` and Key Connector (not available on Vaultwarden),
+  `report password-health`, `get exposed` (Have I Been Pwned lookup; the tool
+  only talks to your server), `get fingerprint` (only useful when confirming
+  members, which needs vault changes).
 - `send`, `receive`, `generate`, `serve` (REST API), SSO login (`--sso`),
   `completion`, `update`, `sdk-version`.
 - Data in old encryption formats (AES-CBC without HMAC, RSA with HMAC);
@@ -138,9 +139,10 @@ data, fileName, err := c.Export(ctx, bw.ExportOptions{Format: "json"})
 ```
 
 - `bw.Client` covers everything the CLI does: login/unlock/lock/sync, reading
-  items (incl. attachments), folders, collections, organizations and members,
-  and export. It never changes vault data. All methods are safe for concurrent
-  use; network calls take a `context.Context`.
+  items (`Items`, `FindItem`, `FindAttachment`, `Attachment`), folders,
+  collections, organizations and members, and export. It never changes vault
+  data. All methods are safe for concurrent use; network calls take a
+  `context.Context`. A compiled example is in `example_test.go`.
 - Errors are values: `bw.ErrLocked`, `bw.ErrNotFound`,
   `*bw.MultipleResultsError`, `*bw.TwoFactorRequiredError`, `*bw.APIError`, …
   Messages match the official CLI and can be shown to users.
@@ -149,8 +151,8 @@ data, fileName, err := c.Export(ctx, bw.ExportOptions{Format: "json"})
 - `NewSession`/`UnlockWithSession` provide the CLI's `BW_SESSION` mechanism if
   several processes need to share an unlocked vault.
 - `github.com/oneryx/bw/vault` holds the data model (`vault.Cipher`,
-  `vault.Folder`, `vault.Collection`, …), search and URI matching;
-  `github.com/oneryx/bw/totp` generates TOTP codes.
+  `vault.Folder`, `vault.Collection`, …) and the official search, sorting and
+  URI matching rules; `github.com/oneryx/bw/totp` generates TOTP codes.
 
 The CLI (`internal/cli`) is a thin layer over this API that adds prompts,
 flags and output formatting.

@@ -178,11 +178,8 @@ func (s *Session) AddAttachment(itemID, fileName string, data []byte) error {
 	if err := s.Client.Do(ctx, http.MethodPost, "/ciphers/"+itemID+"/attachment/v2", body, &up); err != nil {
 		return err
 	}
-	mp, err := api.Multipart(nil, "data", encName, encData)
-	if err != nil {
-		return err
-	}
-	return s.Client.SendRaw(ctx, http.MethodPost, s.Client.Env.APIURL()+"/ciphers/"+itemID+"/attachment/"+up.AttachmentID, mp, nil)
+	return postFile(ctx, s.Client.Env.APIURL()+"/ciphers/"+itemID+"/attachment/"+up.AttachmentID,
+		s.Client.Tokens.AccessToken, "data", encName, encData)
 }
 
 // Seed creates test data in the personal vault: folder "Work" holding the

@@ -14,12 +14,9 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"math/big"
 	"strings"
 
 	"golang.org/x/crypto/argon2"
-
-	"github.com/oneryx/bw/internal/wordlist"
 )
 
 var (
@@ -112,23 +109,6 @@ func StretchKey(key []byte) *SymmetricKey {
 	enc, _ := hkdf.Expand(sha256.New, key, "enc", 32)
 	mac, _ := hkdf.Expand(sha256.New, key, "mac", 32)
 	return &SymmetricKey{Enc: enc, Mac: mac}
-}
-
-// Fingerprint returns the 5-word account fingerprint phrase.
-func Fingerprint(material string, publicKey []byte) (string, error) {
-	h, err := hkdf.Expand(sha256.New, publicKey, material, 32)
-	if err != nil {
-		return "", err
-	}
-	n := new(big.Int).SetBytes(h)
-	size := big.NewInt(int64(len(wordlist.EFFLong)))
-	words := make([]string, 0, 5)
-	rem := new(big.Int)
-	for range 5 {
-		n.DivMod(n, size, rem)
-		words = append(words, wordlist.EFFLong[rem.Int64()])
-	}
-	return strings.Join(words, "-"), nil
 }
 
 // --- AES-CBC helpers ---

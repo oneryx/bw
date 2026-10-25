@@ -5,9 +5,8 @@ package testutil
 import (
 	"context"
 	"encoding/base64"
-	"net/http"
+	"encoding/json"
 
-	"github.com/oneryx/bw/internal/api"
 	"github.com/oneryx/bw/internal/crypto"
 	"github.com/oneryx/bw/internal/state"
 )
@@ -32,12 +31,17 @@ func Register(serverURL, email, password string) error {
 	if err != nil {
 		return err
 	}
-	c := &api.Client{Env: state.Environment{Base: serverURL}}
+	ctx := context.Background()
+	identity := state.Environment{Base: serverURL}.IdentityURL()
 	// Without SMTP, Vaultwarden returns the verification token directly.
-	var token string
-	if err := c.SendIdentity(context.Background(), http.MethodPost, "/accounts/register/send-verification-email",
-		map[string]any{"email": email, "name": "Test User", "receiveMarketingEmails": false}, &token); err != nil {
+	resp, err := postJSON(ctx, identity+"/accounts/register/send-verification-email",
+		map[string]any{"email": email, "name": "Test User", "receiveMarketingEmails": false})
+	if err != nil {
 		return err
+	}
+	var token string
+	if json.Unmarshal(resp, &token) != nil {
+		token = string(resp)
 	}
 	body := map[string]any{
 		"email":                  email,
@@ -52,5 +56,6 @@ func Register(serverURL, email, password string) error {
 		"kdf":           kdf.Type,
 		"kdfIterations": kdf.Iterations,
 	}
-	return c.SendIdentity(context.Background(), http.MethodPost, "/accounts/register/finish", body, nil)
+	_, err = postJSON(ctx, identity+"/accounts/register/finish", body)
+	return err
 }

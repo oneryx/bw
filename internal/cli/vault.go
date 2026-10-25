@@ -8,7 +8,7 @@ import (
 
 var (
 	listObjects = []string{"items", "folders", "collections", "org-collections", "org-members", "organizations"}
-	getObjects  = []string{"item", "username", "password", "uri", "totp", "notes", "exposed", "attachment", "folder", "collection", "org-collection", "organization", "fingerprint"}
+	getObjects  = []string{"item", "username", "password", "uri", "totp", "notes", "attachment", "folder", "collection", "org-collection", "organization"}
 )
 
 func validObjects(objs []string) string { return "Valid objects are: " + strings.Join(objs, ", ") }
@@ -57,7 +57,6 @@ func (a *App) getCmd() *cobra.Command {
   bw get password https://google.com
   bw get totp google.com
   bw get notes google.com
-  bw get exposed yahoo.com
   bw get attachment b857igwl1dzrs2 --itemid 99ee88d2-6046-4ea7-92c2-acac464b1412 --output ./photo.jpg
   bw get attachment photo.jpg --itemid 99ee88d2-6046-4ea7-92c2-acac464b1412 --raw
   bw get folder email`,

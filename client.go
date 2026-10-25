@@ -1,24 +1,10 @@
-// Package bw is a client library for Vaultwarden (and Bitwarden-compatible)
-// password manager servers. It powers the bw command line tool and can be
-// embedded in other applications such as GUI clients.
+// Package bw is a read-only client library for Vaultwarden (and
+// Bitwarden-compatible) password manager servers. It powers the bw command
+// line tool and can be used by other Go programs.
 //
 // A Client keeps its configuration, tokens and the encrypted vault cache in a
 // Store. Vault data stays encrypted at rest; it is decrypted in memory once
-// the client is unlocked with the master password.
-//
-//	c, err := bw.New(bw.Options{Store: bw.FileStore("/path/to/data.json")})
-//	if err != nil { ... }
-//	if !c.LoggedIn() {
-//		_ = c.SetServerConfig(bw.ServerConfig{Base: "https://vault.example.com"})
-//		err = c.Login(ctx, bw.LoginOptions{Email: email, Password: password})
-//		var tf *bw.TwoFactorRequiredError
-//		if errors.As(err, &tf) {
-//			err = tf.Submit(ctx, bw.TwoFactorAuthenticator, code)
-//		}
-//	} else {
-//		err = c.Unlock(password)
-//	}
-//	items, err := c.Items(bw.ItemFilter{Search: "github"})
+// the client is unlocked with the master password. See the package example.
 //
 // All methods are safe for concurrent use.
 package bw
@@ -33,7 +19,6 @@ import (
 	"github.com/oneryx/bw/internal/api"
 	"github.com/oneryx/bw/internal/crypto"
 	"github.com/oneryx/bw/internal/state"
-	"github.com/oneryx/bw/vault"
 )
 
 // Store persists the client state (configuration, tokens and the encrypted
@@ -91,7 +76,7 @@ type Client struct {
 	// userKey is the decrypted user key while the vault is unlocked.
 	userKey *crypto.SymmetricKey
 	// vault caches the opened vault; reset whenever the cache changes.
-	vault *vault.Vault
+	vault *openVault
 }
 
 // New loads the state from opts.Store and returns a locked client.
@@ -118,13 +103,6 @@ func (c *Client) api() *api.Client {
 	return a
 }
 
-func (c *Client) httpClient() *http.Client {
-	if c.opts.HTTPClient != nil {
-		return c.opts.HTTPClient
-	}
-	return http.DefaultClient
-}
-
 // save persists the state and drops the opened vault.
 func (c *Client) save() error {
 	c.vault = nil
@@ -139,7 +117,7 @@ func (c *Client) requireAuthed() error {
 }
 
 // open returns the decrypted vault, or ErrLocked / ErrNotLoggedIn.
-func (c *Client) open() (*vault.Vault, error) {
+func (c *Client) open() (*openVault, error) {
 	if err := c.requireAuthed(); err != nil {
 		return nil, err
 	}
@@ -147,20 +125,13 @@ func (c *Client) open() (*vault.Vault, error) {
 		return nil, ErrLocked
 	}
 	if c.vault == nil {
-		v, err := vault.Open(c.st.Account.Vault, c.userKey, c.st.Account.EncPrivateKey)
+		v, err := openSyncData(c.st.Account.Vault, c.userKey, c.st.Account.EncPrivateKey)
 		if err != nil {
 			return nil, err
 		}
 		c.vault = v
 	}
 	return c.vault, nil
-}
-
-func (c *Client) userID() string {
-	if c.st.Account == nil {
-		return ""
-	}
-	return c.st.Account.UserID
 }
 
 // ServerConfig holds the server URLs. Base is the URL of a self-hosted

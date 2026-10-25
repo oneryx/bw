@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/oneryx/bw/internal/crypto"
+	"github.com/oneryx/bw/internal/export"
 	"github.com/oneryx/bw/internal/output"
 	"github.com/oneryx/bw/vault"
 )
@@ -80,26 +81,23 @@ func exportFileName(prefix, format string) string {
 
 func prettyJSON(v any) string { return output.JSON(v, "  ") }
 
-func (c *Client) individualExport(ctx context.Context, v *vault.Vault, format, password string) ([]byte, string, error) {
-	ciphers := v.Ciphers()
-	active := ciphers[:0:0]
-	for _, ci := range ciphers {
-		if ci.DeletedDate == nil {
-			active = append(active, ci)
-		}
-	}
+func (c *Client) individualExport(ctx context.Context, v *openVault, format, password string) ([]byte, string, error) {
+	// Individual exports contain the active items not owned by an organization.
+	personal := slices.DeleteFunc(v.ciphers(), func(ci *vault.Cipher) bool {
+		return ci.DeletedDate != nil || ci.OrganizationID != nil
+	})
 	switch format {
 	case "csv":
 		folderName := map[string]string{}
-		for _, f := range v.Folders() {
+		for _, f := range v.folders() {
 			folderName[f.ID] = f.Name
 		}
-		var rows []*vault.CSVRow
-		for _, ci := range active {
-			if (ci.Type != vault.TypeLogin && ci.Type != vault.TypeSecureNote) || ci.OrganizationID != nil {
+		var rows []*export.CSVRow
+		for _, ci := range personal {
+			if ci.Type != vault.TypeLogin && ci.Type != vault.TypeSecureNote {
 				continue
 			}
-			row := &vault.CSVRow{Keys: []string{"folder", "favorite"}, Values: map[string]any{}}
+			row := &export.CSVRow{Keys: []string{"folder", "favorite"}, Values: map[string]any{}}
 			if ci.FolderID != nil {
 				if n, ok := folderName[*ci.FolderID]; ok {
 					row.Values["folder"] = n
@@ -108,65 +106,59 @@ func (c *Client) individualExport(ctx context.Context, v *vault.Vault, format, p
 			if ci.Favorite {
 				row.Values["favorite"] = 1
 			}
-			vault.CommonCSV(row, ci)
+			export.CommonCSV(row, ci)
 			rows = append(rows, row)
 		}
-		return []byte(vault.UnparseCSV(rows)), exportFileName("", "csv"), nil
-	case "json", "zip":
-		doc := decryptedJSONExport(v, active)
-		if format == "json" {
-			return []byte(doc), exportFileName("", "json"), nil
-		}
-		data, err := c.zipExport(ctx, v, doc, active)
+		return []byte(export.UnparseCSV(rows)), exportFileName("", "csv"), nil
+	case "json":
+		return []byte(decryptedJSONExport(v, personal)), exportFileName("", "json"), nil
+	case "zip":
+		data, err := c.zipExport(ctx, v, decryptedJSONExport(v, personal), personal)
 		return data, exportFileName("", "zip"), err
-	case "encrypted_json":
-		if password != "" {
-			doc := decryptedJSONExport(v, active)
-			out, err := c.passwordProtect(doc, password)
-			return []byte(out), exportFileName("", "encrypted_json"), err
-		}
-		validation, err := crypto.EncryptString(v.UserKey, uuid.NewString())
-		if err != nil {
-			return nil, "", err
-		}
-		doc := struct {
-			Encrypted  bool                        `json:"encrypted"`
-			Validation string                      `json:"encKeyValidation_DO_NOT_EDIT"`
-			Folders    []vault.ExportFolder        `json:"folders"`
-			Items      []vault.EncryptedExportItem `json:"items"`
-		}{Encrypted: true, Validation: validation, Folders: []vault.ExportFolder{}, Items: []vault.EncryptedExportItem{}}
-		for _, f := range v.Data.Folders {
-			doc.Folders = append(doc.Folders, vault.ExportFolder{Name: f.Name, ID: f.ID})
-		}
-		raw := make([]*vault.Cipher, 0, len(v.Data.Ciphers))
-		for i := range v.Data.Ciphers {
-			ci := &v.Data.Ciphers[i]
-			if ci.DeletedDate == nil && ci.OrganizationID == nil {
-				raw = append(raw, ci)
-			}
-		}
-		vault.SortByID(raw)
-		for _, ci := range raw {
-			doc.Items = append(doc.Items, vault.EncryptedExportItemOutput(ci, false))
-		}
-		return []byte(prettyJSON(doc)), exportFileName("", "encrypted_json"), nil
 	}
-	return nil, "", fmt.Errorf("unsupported format %s", format)
+	// encrypted_json
+	if password != "" {
+		out, err := c.passwordProtect(decryptedJSONExport(v, personal), password)
+		return []byte(out), exportFileName("", "encrypted_json"), err
+	}
+	validation, err := crypto.EncryptString(v.userKey, uuid.NewString())
+	if err != nil {
+		return nil, "", err
+	}
+	doc := struct {
+		Encrypted  bool                   `json:"encrypted"`
+		Validation string                 `json:"encKeyValidation_DO_NOT_EDIT"`
+		Folders    []export.Folder        `json:"folders"`
+		Items      []export.EncryptedItem `json:"items"`
+	}{Encrypted: true, Validation: validation, Folders: []export.Folder{}, Items: []export.EncryptedItem{}}
+	for _, f := range v.data.Folders {
+		doc.Folders = append(doc.Folders, export.Folder{Name: f.Name, ID: f.ID})
+	}
+	raw := make([]*vault.Cipher, 0, len(v.data.Ciphers))
+	for i := range v.data.Ciphers {
+		ci := &v.data.Ciphers[i]
+		if ci.DeletedDate == nil && ci.OrganizationID == nil {
+			raw = append(raw, ci)
+		}
+	}
+	export.SortByID(raw)
+	for _, ci := range raw {
+		doc.Items = append(doc.Items, export.NewEncryptedItem(ci, false))
+	}
+	return []byte(prettyJSON(doc)), exportFileName("", "encrypted_json"), nil
 }
 
-func decryptedJSONExport(v *vault.Vault, active []*vault.Cipher) string {
+func decryptedJSONExport(v *openVault, personal []*vault.Cipher) string {
 	doc := struct {
-		Encrypted bool                 `json:"encrypted"`
-		Folders   []vault.ExportFolder `json:"folders"`
-		Items     []vault.ExportItem   `json:"items"`
-	}{Folders: []vault.ExportFolder{}, Items: []vault.ExportItem{}}
-	for _, f := range v.Folders() {
-		doc.Folders = append(doc.Folders, vault.ExportFolder{Name: f.Name, ID: f.ID})
+		Encrypted bool            `json:"encrypted"`
+		Folders   []export.Folder `json:"folders"`
+		Items     []export.Item   `json:"items"`
+	}{Folders: []export.Folder{}, Items: []export.Item{}}
+	for _, f := range v.folders() {
+		doc.Folders = append(doc.Folders, export.Folder{Name: f.Name, ID: f.ID})
 	}
-	for _, ci := range active {
-		if ci.OrganizationID == nil {
-			doc.Items = append(doc.Items, vault.ExportItemOutput(ci, false))
-		}
+	for _, ci := range personal {
+		doc.Items = append(doc.Items, export.NewItem(ci, false))
 	}
 	return prettyJSON(doc)
 }
@@ -212,7 +204,7 @@ var (
 )
 
 // zipExport mirrors getDecryptedExportZip: data.json plus decrypted attachments.
-func (c *Client) zipExport(ctx context.Context, v *vault.Vault, doc string, active []*vault.Cipher) ([]byte, error) {
+func (c *Client) zipExport(ctx context.Context, v *openVault, doc string, personal []*vault.Cipher) ([]byte, error) {
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
 	now := time.Now()
@@ -230,8 +222,8 @@ func (c *Client) zipExport(ctx context.Context, v *vault.Vault, doc string, acti
 		return nil, err
 	}
 	names := map[string]int{}
-	for _, ci := range active {
-		if len(ci.Attachments) == 0 || ci.OrganizationID != nil {
+	for _, ci := range personal {
+		if len(ci.Attachments) == 0 {
 			continue
 		}
 		folder := multiUnder.ReplaceAllString(unsafeName.ReplaceAllString(ci.Name, "_"), "_")
@@ -245,7 +237,7 @@ func (c *Client) zipExport(ctx context.Context, v *vault.Vault, doc string, acti
 		for _, at := range ci.Attachments {
 			data, err := c.downloadAttachment(ctx, v, ci.ID, at.ID)
 			if err != nil {
-				continue
+				return nil, fmt.Errorf("Cannot export attachment %s of %s: %w", at.FileName, ci.Name, err)
 			}
 			base, suffix := at.FileName, ""
 			if parts := strings.Split(at.FileName, "."); len(parts) > 1 {
@@ -276,11 +268,11 @@ func (c *Client) zipExport(ctx context.Context, v *vault.Vault, doc string, acti
 }
 
 // orgExport mirrors getOrganizationExport (full export via the org API).
-func (c *Client) orgExport(ctx context.Context, v *vault.Vault, orgID, format, password string) ([]byte, string, error) {
+func (c *Client) orgExport(ctx context.Context, v *openVault, orgID, format, password string) ([]byte, string, error) {
 	if format == "zip" {
 		return nil, "", fmt.Errorf("Zip export not supported for organization")
 	}
-	orgKey, err := v.OrgKey(orgID)
+	orgKey, err := v.orgKey(orgID)
 	if err != nil {
 		return nil, "", fmt.Errorf("No encryption key found for organization")
 	}
@@ -291,45 +283,40 @@ func (c *Client) orgExport(ctx context.Context, v *vault.Vault, orgID, format, p
 	if err := c.api().Get(ctx, "/organizations/"+orgID+"/export", &res); err != nil {
 		return nil, "", err
 	}
-	var live []vault.Cipher
-	for _, ci := range res.Ciphers {
-		if ci.DeletedDate == nil {
-			live = append(live, ci)
-		}
-	}
+	live := slices.DeleteFunc(res.Ciphers, func(ci vault.Cipher) bool { return ci.DeletedDate != nil })
 	if format == "encrypted_json" && password == "" {
 		validation, err := crypto.EncryptString(orgKey, uuid.NewString())
 		if err != nil {
 			return nil, "", err
 		}
 		doc := struct {
-			Encrypted   bool                        `json:"encrypted"`
-			Validation  string                      `json:"encKeyValidation_DO_NOT_EDIT"`
-			Collections []vault.ExportCollection    `json:"collections"`
-			Items       []vault.EncryptedExportItem `json:"items"`
-		}{Encrypted: true, Validation: validation, Collections: []vault.ExportCollection{}, Items: []vault.EncryptedExportItem{}}
+			Encrypted   bool                   `json:"encrypted"`
+			Validation  string                 `json:"encKeyValidation_DO_NOT_EDIT"`
+			Collections []export.Collection    `json:"collections"`
+			Items       []export.EncryptedItem `json:"items"`
+		}{Encrypted: true, Validation: validation, Collections: []export.Collection{}, Items: []export.EncryptedItem{}}
 		for _, col := range res.Collections {
-			doc.Collections = append(doc.Collections, vault.ExportCollection{ID: col.ID, OrganizationID: col.OrganizationID, Name: col.Name, ExternalID: col.ExternalID})
+			doc.Collections = append(doc.Collections, export.Collection{ID: col.ID, OrganizationID: col.OrganizationID, Name: col.Name, ExternalID: col.ExternalID})
 		}
 		for i := range live {
-			doc.Items = append(doc.Items, vault.EncryptedExportItemOutput(&live[i], true))
+			doc.Items = append(doc.Items, export.NewEncryptedItem(&live[i], true))
 		}
 		return []byte(prettyJSON(doc)), exportFileName("org", "encrypted_json"), nil
 	}
 	cols := map[string]string{}
-	var decCols []vault.ExportCollection
+	var decCols []export.Collection
 	for _, col := range res.Collections {
-		name := v.DecryptCollectionName(orgID, col.Name)
+		name := v.collectionName(orgID, col.Name)
 		cols[col.ID] = name
-		decCols = append(decCols, vault.ExportCollection{ID: col.ID, OrganizationID: col.OrganizationID, Name: name, ExternalID: col.ExternalID})
+		decCols = append(decCols, export.Collection{ID: col.ID, OrganizationID: col.OrganizationID, Name: name, ExternalID: col.ExternalID})
 	}
 	var dec []*vault.Cipher
 	for i := range live {
-		dec = append(dec, v.Decrypt(&live[i]))
+		dec = append(dec, v.decrypt(&live[i]))
 	}
 	switch format {
 	case "csv":
-		var rows []*vault.CSVRow
+		var rows []*export.CSVRow
 		for _, ci := range dec {
 			if ci.Type != vault.TypeLogin && ci.Type != vault.TypeSecureNote {
 				continue
@@ -340,20 +327,20 @@ func (c *Client) orgExport(ctx context.Context, v *vault.Vault, orgID, format, p
 					names = append(names, n)
 				}
 			}
-			row := &vault.CSVRow{Keys: []string{"collections"}, Values: map[string]any{"collections": names}}
-			vault.CommonCSV(row, ci)
+			row := &export.CSVRow{Keys: []string{"collections"}, Values: map[string]any{"collections": names}}
+			export.CommonCSV(row, ci)
 			rows = append(rows, row)
 		}
-		return []byte(vault.UnparseCSV(rows)), exportFileName("org", "csv"), nil
+		return []byte(export.UnparseCSV(rows)), exportFileName("org", "csv"), nil
 	default:
 		doc := struct {
-			Encrypted   bool                     `json:"encrypted"`
-			Collections []vault.ExportCollection `json:"collections"`
-			Items       []vault.ExportItem       `json:"items"`
-		}{Collections: []vault.ExportCollection{}, Items: []vault.ExportItem{}}
+			Encrypted   bool                `json:"encrypted"`
+			Collections []export.Collection `json:"collections"`
+			Items       []export.Item       `json:"items"`
+		}{Collections: []export.Collection{}, Items: []export.Item{}}
 		doc.Collections = append(doc.Collections, decCols...)
 		for _, ci := range dec {
-			doc.Items = append(doc.Items, vault.ExportItemOutput(ci, true))
+			doc.Items = append(doc.Items, export.NewItem(ci, true))
 		}
 		out := prettyJSON(doc)
 		if format == "encrypted_json" {

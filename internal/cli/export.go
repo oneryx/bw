@@ -16,23 +16,23 @@ func (a *App) runExport(cmd *cobra.Command, args []string) output.Response {
 	if err != nil {
 		return errResp(err)
 	}
-	orgID := str(cmd, "organizationid")
-	hasPassword := changed(cmd, "password")
-	password := strings.TrimSpace(str(cmd, "password"))
 	format := str(cmd, "format")
-	if hasPassword && password != "" && format == "json" {
-		format = "encrypted_json"
-	}
-	if format == "" {
-		format = "csv"
-	}
-	if !slices.Contains(bw.ExportFormats, format) {
+	// Checked here because library errors are printed as thrown errors ("Error: ...").
+	if format != "" && !slices.Contains(bw.ExportFormats, format) {
 		return output.Error("'%s' is not a supported export format. Supported formats: %s.", format, strings.Join(bw.ExportFormats, ", "))
 	}
-	if changed(cmd, "organizationid") && !isGUID(orgID) {
-		return output.Error("`%s` is not a GUID.", orgID)
+	orgID := str(cmd, "organizationid")
+	if changed(cmd, "organizationid") {
+		if err := checkGUID(orgID); err != nil {
+			return errResp(err)
+		}
 	}
-	if format == "encrypted_json" && hasPassword && password == "" {
+	password := strings.TrimSpace(str(cmd, "password"))
+	// "--password" without a value (NoOptDefVal " ") asks for the password.
+	if format == "encrypted_json" && changed(cmd, "password") && password == "" {
+		if a.noInteraction {
+			return output.Error("Export file password is required. Try again in interactive mode or provide it with --password <password>.")
+		}
 		password = promptSecret("Export file password:")
 	}
 	data, fileName, err := c.Export(context.Background(), bw.ExportOptions{Format: format, Password: password, OrganizationID: orgID})

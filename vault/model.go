@@ -1,11 +1,14 @@
-// Package vault holds the vault data model, decryption/encryption of vault
-// objects and the CLI response shapes.
+// Package vault holds the vault data model returned by bw.Client (items,
+// folders, collections, organizations) and the official clients' search,
+// sorting and URI matching rules.
 package vault
 
 import (
 	"encoding/json"
-	"strconv"
 )
+
+// DecryptError is the placeholder the official clients show for undecryptable values.
+const DecryptError = "[error: cannot decrypt]"
 
 // Cipher types.
 const (
@@ -19,6 +22,7 @@ const (
 // FlexString accepts a JSON string or number (attachment sizes vary by server).
 type FlexString string
 
+// UnmarshalJSON implements json.Unmarshaler.
 func (f *FlexString) UnmarshalJSON(b []byte) error {
 	if len(b) > 0 && b[0] == '"' {
 		var s string
@@ -40,8 +44,8 @@ func (f *FlexString) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-// Cipher is the server representation of a vault item. The same struct holds
-// decrypted values after Decrypt; encrypted string fields are walked by strings().
+// Cipher is a vault item. bw.Client returns it with all text fields
+// decrypted; the server sends the same shape with EncStrings.
 type Cipher struct {
 	ID                  string            `json:"id,omitempty"`
 	OrganizationID      *string           `json:"organizationId"`
@@ -68,12 +72,9 @@ type Cipher struct {
 	CreationDate        *string           `json:"creationDate,omitempty"`
 	DeletedDate         *string           `json:"deletedDate,omitempty"`
 	ArchivedDate        *string           `json:"archivedDate,omitempty"`
-	// Unknown server fields of newer item types are kept so edits don't drop them.
-	BankAccount    json.RawMessage `json:"bankAccount,omitempty"`
-	DriversLicense json.RawMessage `json:"driversLicense,omitempty"`
-	Passport       json.RawMessage `json:"passport,omitempty"`
 }
 
+// Login is the login part of a TypeLogin item.
 type Login struct {
 	URIs                 []LoginURI        `json:"uris"`
 	Username             *string           `json:"username"`
@@ -84,12 +85,14 @@ type Login struct {
 	Fido2Credentials     []Fido2Credential `json:"fido2Credentials,omitempty"`
 }
 
+// LoginURI is a login URI with its optional match strategy (Match* constants).
 type LoginURI struct {
 	URI         *string `json:"uri"`
 	URIChecksum *string `json:"uriChecksum,omitempty"`
 	Match       *int    `json:"match"`
 }
 
+// Fido2Credential is a passkey stored with a login.
 type Fido2Credential struct {
 	CredentialID    *string `json:"credentialId"`
 	KeyType         *string `json:"keyType"`
@@ -106,6 +109,7 @@ type Fido2Credential struct {
 	CreationDate    *string `json:"creationDate"`
 }
 
+// Card is the card part of a TypeCard item.
 type Card struct {
 	CardholderName *string `json:"cardholderName"`
 	Brand          *string `json:"brand"`
@@ -115,6 +119,7 @@ type Card struct {
 	Code           *string `json:"code"`
 }
 
+// Identity is the identity part of a TypeIdentity item.
 type Identity struct {
 	Title          *string `json:"title"`
 	FirstName      *string `json:"firstName"`
@@ -136,16 +141,19 @@ type Identity struct {
 	LicenseNumber  *string `json:"licenseNumber"`
 }
 
+// SecureNote is the secure note part of a TypeSecureNote item.
 type SecureNote struct {
 	Type int `json:"type"`
 }
 
+// SSHKey is the key part of a TypeSSHKey item.
 type SSHKey struct {
 	PrivateKey     *string `json:"privateKey"`
 	PublicKey      *string `json:"publicKey"`
 	KeyFingerprint *string `json:"keyFingerprint"`
 }
 
+// Field is a custom field (Type 0 text, 1 hidden, 2 boolean, 3 linked).
 type Field struct {
 	Name     *string `json:"name"`
 	Value    *string `json:"value"`
@@ -153,11 +161,14 @@ type Field struct {
 	LinkedID *int    `json:"linkedId"`
 }
 
+// PasswordHistory is a previous password of a login.
 type PasswordHistory struct {
 	Password     string `json:"password"`
 	LastUsedDate string `json:"lastUsedDate"`
 }
 
+// Attachment describes a file attached to an item; download it with
+// bw.Client.Attachment.
 type Attachment struct {
 	ID       string     `json:"id"`
 	URL      *string    `json:"url,omitempty"`
@@ -165,87 +176,6 @@ type Attachment struct {
 	Key      *string    `json:"key"`
 	Size     FlexString `json:"size"`
 	SizeName string     `json:"sizeName"`
-}
-
-// strings visits every encrypted string field of the cipher (except the
-// cipher key and attachment keys, which wrap keys rather than text).
-func (c *Cipher) strings(f func(*string) error) error {
-	visit := func(ps ...*string) error {
-		for _, p := range ps {
-			if p != nil {
-				if err := f(p); err != nil {
-					return err
-				}
-			}
-		}
-		return nil
-	}
-	opt := func(pps ...**string) error {
-		for _, pp := range pps {
-			if *pp != nil {
-				if err := f(*pp); err != nil {
-					return err
-				}
-			}
-		}
-		return nil
-	}
-	if err := visit(&c.Name); err != nil {
-		return err
-	}
-	if err := opt(&c.Notes); err != nil {
-		return err
-	}
-	if l := c.Login; l != nil {
-		if err := opt(&l.Username, &l.Password, &l.Totp); err != nil {
-			return err
-		}
-		for i := range l.URIs {
-			if err := opt(&l.URIs[i].URI, &l.URIs[i].URIChecksum); err != nil {
-				return err
-			}
-		}
-		for i := range l.Fido2Credentials {
-			fc := &l.Fido2Credentials[i]
-			if err := opt(&fc.CredentialID, &fc.KeyType, &fc.KeyAlgorithm, &fc.KeyCurve, &fc.KeyValue,
-				&fc.RpID, &fc.UserHandle, &fc.UserName, &fc.Counter, &fc.RpName, &fc.UserDisplayName, &fc.Discoverable); err != nil {
-				return err
-			}
-		}
-	}
-	if cd := c.Card; cd != nil {
-		if err := opt(&cd.CardholderName, &cd.Brand, &cd.Number, &cd.ExpMonth, &cd.ExpYear, &cd.Code); err != nil {
-			return err
-		}
-	}
-	if id := c.Identity; id != nil {
-		if err := opt(&id.Title, &id.FirstName, &id.MiddleName, &id.LastName, &id.Address1, &id.Address2,
-			&id.Address3, &id.City, &id.State, &id.PostalCode, &id.Country, &id.Company, &id.Email,
-			&id.Phone, &id.SSN, &id.Username, &id.PassportNumber, &id.LicenseNumber); err != nil {
-			return err
-		}
-	}
-	if k := c.SSHKey; k != nil {
-		if err := opt(&k.PrivateKey, &k.PublicKey, &k.KeyFingerprint); err != nil {
-			return err
-		}
-	}
-	for i := range c.Fields {
-		if err := opt(&c.Fields[i].Name, &c.Fields[i].Value); err != nil {
-			return err
-		}
-	}
-	for i := range c.PasswordHistory {
-		if err := visit(&c.PasswordHistory[i].Password); err != nil {
-			return err
-		}
-	}
-	for i := range c.Attachments {
-		if err := visit(&c.Attachments[i].FileName); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // Clone returns a deep copy via JSON round-trip.
@@ -285,5 +215,10 @@ type ProfileOrganization struct {
 	UseTotp bool   `json:"useTotp"`
 }
 
-// Itoa is a small helper used by response builders.
-func Itoa(i int) string { return strconv.Itoa(i) }
+// SelectionReadOnly is a group/user access entry of an org collection.
+type SelectionReadOnly struct {
+	ID            string `json:"id"`
+	ReadOnly      bool   `json:"readOnly"`
+	HidePasswords bool   `json:"hidePasswords"`
+	Manage        bool   `json:"manage"`
+}

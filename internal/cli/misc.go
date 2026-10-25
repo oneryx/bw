@@ -2,16 +2,12 @@ package cli
 
 import (
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/oneryx/bw"
 	"github.com/oneryx/bw/internal/output"
 )
-
-// jsTime formats a time like JavaScript's Date.toJSON().
-func jsTime(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000Z") }
 
 func (a *App) configCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -105,7 +101,7 @@ func (a *App) statusCmd() *cobra.Command {
 			s := c.Status()
 			t := statusTemplate{ServerURL: s.ServerURL, UserEmail: s.UserEmail, UserID: s.UserID, Status: s.Status}
 			if s.LastSync != nil {
-				last := jsTime(*s.LastSync)
+				last := output.JSTime(*s.LastSync)
 				t.LastSync = &last
 			}
 			return output.Template(t)

@@ -1,8 +1,7 @@
 package vault
 
-// Code generated from Unicode NFD data for U+00C0–U+024F; DO NOT EDIT.
-
-// diacriticFold maps precomposed Latin letters to their base letter, matching
+// diacriticFold maps precomposed Latin letters (U+00C0–U+024F, derived from
+// Unicode NFD data) to their base letter, matching
 // normalize("NFD").replace(/[\u0300-\u036f]/g, "") for this range.
 var diacriticFold = map[rune]rune{
 	'À': 'A', 'Á': 'A', 'Â': 'A', 'Ã': 'A', 'Ä': 'A', 'Å': 'A', 'Ç': 'C', 'È': 'E', 'É': 'E',

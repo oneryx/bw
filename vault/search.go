@@ -27,7 +27,7 @@ func stripMarks(s string) string {
 
 // collate approximates Intl.Collator(locale, {numeric: true, sensitivity: "base"}).
 func collate(a, b string) int {
-	ar, br := []rune(stripMarks(strings.ToLower(a))), []rune(stripMarks(strings.ToLower(b)))
+	ar, br := []rune(fold(a)), []rune(fold(b))
 	i, j := 0, 0
 	for i < len(ar) && j < len(br) {
 		ca, cb := ar[i], br[j]
@@ -90,7 +90,8 @@ func cmpInt(a, b int) int {
 	return 0
 }
 
-func sortBy[T any](items []T, key func(T) string) {
+// SortBy sorts items by a name like the official clients (Intl.Collator).
+func SortBy[T any](items []T, key func(T) string) {
 	slices.SortStableFunc(items, func(a, b T) int { return collate(key(a), key(b)) })
 }
 
@@ -194,11 +195,10 @@ func parseURL(uri string) *url.URL {
 	if uri == "" || strings.HasPrefix(uri, "data:") || strings.HasPrefix(uri, "about:") {
 		return nil
 	}
-	if !schemeRe.MatchString(uri) && strings.Contains(uri, ".") {
-		uri = "http://" + uri
-	} else if !schemeRe.MatchString(uri) && !strings.HasPrefix(uri, "localhost") {
-		return nil
-	} else if !schemeRe.MatchString(uri) {
+	if !schemeRe.MatchString(uri) {
+		if !strings.Contains(uri, ".") && !strings.HasPrefix(uri, "localhost") {
+			return nil
+		}
 		uri = "http://" + uri
 	}
 	u, err := url.Parse(uri)
@@ -228,39 +228,35 @@ func Domain(uri string) string {
 // SearchCiphers mirrors searchCiphersBasic: every query term must match the
 // name, an id prefix (8+ chars), the subtitle, a URI hostname or the notes.
 func SearchCiphers(cs []*Cipher, query string) []*Cipher {
-	terms := strings.Fields(stripMarks(strings.ToLower(strings.TrimSpace(query))))
-	has := func(s *string, term string) bool {
-		return s != nil && strings.Contains(stripMarks(strings.ToLower(*s)), term)
-	}
+	terms := strings.Fields(fold(strings.TrimSpace(query)))
 	var out []*Cipher
 	for _, c := range cs {
-		ok := true
-		for _, term := range terms {
-			name := c.Name
-			if has(&name, term) || (len(term) >= 8 && strings.HasPrefix(c.ID, term)) || has(c.Subtitle(), term) || has(c.Notes, term) {
-				continue
-			}
-			found := false
-			if c.Login != nil {
-				for _, u := range c.Login.URIs {
-					if u.URI != nil {
-						if h := Hostname(*u.URI); h != "" && strings.Contains(stripMarks(strings.ToLower(h)), term) {
-							found = true
-							break
-						}
-					}
-				}
-			}
-			if !found {
-				ok = false
-				break
-			}
-		}
-		if ok {
+		if !slices.ContainsFunc(terms, func(term string) bool { return !c.matchesTerm(term) }) {
 			out = append(out, c)
 		}
 	}
 	return out
+}
+
+// fold lowercases and strips diacritics for searching.
+func fold(s string) string { return stripMarks(strings.ToLower(s)) }
+
+func (c *Cipher) matchesTerm(term string) bool {
+	has := func(s *string) bool { return s != nil && strings.Contains(fold(*s), term) }
+	if strings.Contains(fold(c.Name), term) || (len(term) >= 8 && strings.HasPrefix(c.ID, term)) ||
+		has(c.Subtitle()) || has(c.Notes) {
+		return true
+	}
+	if c.Login == nil {
+		return false
+	}
+	return slices.ContainsFunc(c.Login.URIs, func(u LoginURI) bool {
+		if u.URI == nil {
+			return false
+		}
+		h := Hostname(*u.URI)
+		return h != "" && strings.Contains(fold(h), term)
+	})
 }
 
 // SearchByName filters by case-insensitive name substring (folders, collections, orgs).
@@ -288,41 +284,13 @@ const (
 // domainMatchBlacklist mirrors Utils.DomainMatchBlacklist.
 var domainMatchBlacklist = map[string][]string{"google.com": {"script.google.com"}}
 
-// EquivalentDomains returns the domains equivalent to url's domain.
-func (v *Vault) EquivalentDomains(target string) map[string]bool {
-	set := map[string]bool{}
-	d := Domain(target)
-	if d == "" || v.Data.Domains == nil {
-		return set
-	}
-	groups := append([][]string(nil), v.Data.Domains.EquivalentDomains...)
-	for _, g := range v.Data.Domains.GlobalEquivalentDomains {
-		if !g.Excluded {
-			groups = append(groups, g.Domains)
-		}
-	}
-	for _, g := range groups {
-		if slices.Contains(g, d) {
-			for _, x := range g {
-				set[x] = true
-			}
-		}
-	}
-	return set
-}
-
 // MatchesURL mirrors LoginUriView.matchesUri for any of the cipher's URIs.
+// equivalent holds domains treated like the target's own domain (may be nil).
 func (c *Cipher) MatchesURL(target string, equivalent map[string]bool, defaultMatch int) bool {
 	if c.Login == nil || target == "" {
 		return false
 	}
-	domains := map[string]bool{}
-	for k := range equivalent {
-		domains[k] = true
-	}
-	if d := Domain(target); d != "" {
-		domains[d] = true
-	}
+	targetDomain := Domain(target)
 	for _, u := range c.Login.URIs {
 		if u.URI == nil || *u.URI == "" {
 			continue
@@ -335,7 +303,7 @@ func (c *Cipher) MatchesURL(target string, equivalent map[string]bool, defaultMa
 		switch match {
 		case MatchDomain:
 			d := Domain(uri)
-			if d == "" || !domains[d] {
+			if d == "" || (d != targetDomain && !equivalent[d]) {
 				continue
 			}
 			if bl, ok := domainMatchBlacklist[d]; ok && slices.Contains(bl, Host(target)) {
