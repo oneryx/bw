@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<KeePassFile>
+  <Meta><Generator>KeePass</Generator></Meta>
+  <Root>
+    <Group>
+      <Name>Database</Name>
+      <Entry>
+        <String><Key>Title</Key><Value>Root Entry</Value></String>
+        <String><Key>UserName</Key><Value>rootuser</Value></String>
+        <String><Key>Password</Key><Value ProtectInMemory="True">rootpass</Value></String>
+        <String><Key>URL</Key><Value>root.example.com</Value></String>
+        <String><Key>Notes</Key><Value>root notes</Value></String>
+      </Entry>
+      <Group>
+        <Name>Sub Group</Name>
+        <Entry>
+          <String><Key>Title</Key><Value>Sub Entry</Value></String>
+          <String><Key>UserName</Key><Value>subuser</Value></String>
+          <String><Key>Password</Key><Value ProtectInMemory="True">subpass</Value></String>
+          <String><Key>PIN</Key><Value ProtectInMemory="True">9999</Value></String>
+          <String><Key>Hint</Key><Value>a plain custom field</Value></String>
+          <String><Key>Long</Key><Value>line1
+line2</Value></String>
+          <String><Key>otp</Key><Value>key=JBSWY3DPEHPK3PXP</Value></String>
+        </Entry>
+        <Group>
+          <Name>Deeper</Name>
+          <Entry><String><Key>Title</Key><Value>Deep &amp; Entry</Value></String><String><Key>Password</Key><Value>dp</Value></String></Entry>
+        </Group>
+      </Group>
+    </Group>
+  </Root>
+</KeePassFile>

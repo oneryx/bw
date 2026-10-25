@@ -1,0 +1,20 @@
+url,username,password,totp,extra,name,grouping,fav
+https://lp.com,lpuser,lppass,,some notes,LP Site,Folder\Sub,1
+http://sn,,,,"NoteType:Credit Card
+Language:en-US
+Name on Card:John Doe
+Type:Visa
+Number:4111111111111111
+Security Code:123
+Start Date:,
+Expiration Date:January,2030
+Notes:card notes
+more notes",My Card,,0
+http://sn,,,,plain secure note text,Secure Note,(none),0
+http://sn,,,,"NoteType:Address
+Language:en-US
+Title:mr
+First Name:Jim
+Last Name:Bob
+Email Address:jim@example.com
+Custom Thing:value",Home Address,Folder\Sub,0

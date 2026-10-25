@@ -1,0 +1,4 @@
+"url","username","password","httpRealm","formActionOrigin","guid","timeCreated","timeLastUsed","timePasswordChanged"
+"https://www.mozilla.org","fxuser","fxpass",,"https://www.mozilla.org","{0b1}","1","2","3"
+"chrome://FirefoxAccounts","x","y",,,,,,
+"https://accounts.example.net:8443","u2","p2",,,,,,

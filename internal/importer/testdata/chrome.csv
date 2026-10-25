@@ -1,0 +1,4 @@
+name,url,username,password,note
+example.com,https://example.com/login,user1,pass1,a note
+,android://AbC123@com.example.app/,appuser,apppass,
+Blank Pw,https://nopw.example,someone,,

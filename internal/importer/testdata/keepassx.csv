@@ -1,0 +1,6 @@
+"Group","Title","Username","Password","URL","Notes","TOTP","Icon","Last Modified","Created"
+"Root/Email","Gmail","me@gmail.com","pw","https://mail.google.com","note line","otpauth://totp/x?secret=JBSWY3DPEHPK3PXP","0","",""
+"Root","Bank","banker","secret","bank.com","","","0","",""
+"Root/Email/Work","Outlook","w@x.com","pw2","","multi
+line","","0","",""
+"Root","","nouser","","","","","0","",""
