@@ -114,14 +114,6 @@ func StretchKey(key []byte) *SymmetricKey {
 	return &SymmetricKey{Enc: enc, Mac: mac}
 }
 
-// ShareableKey derives a key from a 16-byte secret (used for Sends):
-// HKDF with salt "bitwarden-<name>" and the given info.
-func ShareableKey(secret []byte, name, info string) *SymmetricKey {
-	b, _ := hkdf.Key(sha256.New, secret, []byte("bitwarden-"+name), info, 64)
-	k, _ := NewSymmetricKey(b)
-	return k
-}
-
 // Fingerprint returns the 5-word account fingerprint phrase.
 func Fingerprint(material string, publicKey []byte) (string, error) {
 	h, err := hkdf.Expand(sha256.New, publicKey, material, 32)
@@ -197,7 +189,7 @@ func aesDecrypt(key *SymmetricKey, iv, ct, mac []byte) ([]byte, error) {
 	return pkcs7Unpad(out)
 }
 
-// EncryptBuffer encrypts binary data (attachments, Send files) into the
+// EncryptBuffer encrypts binary data (attachments) into the
 // EncArrayBuffer layout: type(1) | iv(16) | mac(32) | ciphertext.
 func EncryptBuffer(key *SymmetricKey, plain []byte) ([]byte, error) {
 	iv, ct, mac, err := aesEncrypt(key, plain)

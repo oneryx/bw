@@ -1,11 +1,13 @@
-# bw — a Go Bitwarden CLI and client library for Vaultwarden
+# bw — a read-only Go Bitwarden CLI and client library for Vaultwarden
 
-A single static binary (~11 MB, vs ~137 MB for the official Node build) that
-re-implements the [official Bitwarden CLI](https://bitwarden.com/help/cli/)
-for self-hosted [Vaultwarden](https://github.com/dani-garcia/vaultwarden)
-servers. Commands, arguments, flags, environment variables, JSON output and
-exit codes follow the official CLI (verified side-by-side against `bw`
-2026.10.0 and Vaultwarden 1.37), so existing scripts keep working.
+A single static binary (~10 MB, vs ~137 MB for the official Node build) that
+implements the read-only part of the
+[official Bitwarden CLI](https://bitwarden.com/help/cli/) for self-hosted
+[Vaultwarden](https://github.com/dani-garcia/vaultwarden) servers: log in,
+sync, list/get vault objects, and export. It never changes vault data.
+Commands, arguments, flags, environment variables, JSON output and exit codes
+follow the official CLI (verified side-by-side against `bw` 2026.10.0 and
+Vaultwarden 1.37), so existing read-only scripts keep working.
 
 The same functionality is available as a Go library (`github.com/oneryx/bw`)
 for other applications, e.g. GUI clients. See [Library](#library).
@@ -38,58 +40,85 @@ Self-signed server certificate? Point Go at it with `SSL_CERT_FILE=/path/ca.pem`
 (the equivalent of the official `NODE_EXTRA_CA_CERTS`). Like the official CLI,
 plain `http://` servers are refused unless `BWCLI_ENV=development` is set.
 
-State lives in `$XDG_CONFIG_HOME/Bitwarden CLI-go/data.json` (or
-`BITWARDENCLI_APPDATA_DIR`). It is separate from the official CLI's data, so
-both can be used side by side. Vault data stays encrypted at rest; the user key
-is only stored wrapped by the session key (`BW_SESSION`).
+State (server config, login tokens and the encrypted vault cache) lives in
+`data.json` next to the `bw` binary (symlinks are resolved), so that directory
+must be writable; set `BITWARDENCLI_APPDATA_DIR` to use another directory. It
+is separate from the official CLI's data, so both can be used side by side.
+Vault data stays encrypted at rest; the user key is only stored wrapped by the
+session key (`BW_SESSION`). The file contains login tokens: never commit or
+share it.
 
-## Supported commands
+## Commands
 
-`login` (password, `--apikey`, 2FA: authenticator, email),
-`logout`, `lock`, `unlock`, `sync`, `status`, `config server`, `list`, `get`
-(incl. `totp`, `exposed`, `attachment`, `fingerprint`, `template`), `create`,
-`edit`, `delete`, `restore`, `archive`, `move`/`share`, `confirm org-member`,
-`import`, `export` (`csv`, `json`, `encrypted_json`, `zip`, password-protected,
-organization exports), `generate`, `encode`, `send` (+ `list`, `template`, `get`,
-`create`, `edit`, `remove-password`, `delete`), `receive`, `serve` (REST API).
+The tool is read-only: no command changes vault data. Run `bw <command> --help`
+for all options. Commands that read
+the vault need it unlocked (`BW_SESSION` or `--session`); interactively they prompt for the master
+password instead.
 
-Import formats: `bitwardencsv`, `bitwardenjson` (plain, account-encrypted and
-password-protected), `keepass2xml`, `keepassxcsv`.
+### Account and setup
+
+| Command | Description | Examples |
+|---|---|---|
+| `config server` | Show or set the server URL (log out first to change it). `--api`, `--identity`, `--web-vault` … override single services. | `bw config server https://vault.example.com`<br>`bw config server` |
+| `login` | Log in with email and master password, or a personal API key (`BW_CLIENTID`/`BW_CLIENTSECRET`). Supports authenticator and email two-step login. Prints a session key. | `bw login you@example.com`<br>`bw login you@example.com --passwordfile pw.txt --raw`<br>`bw login you@example.com --method 0 --code 123456`<br>`bw login --apikey` |
+| `unlock` | Unlock the vault with the master password and print a new session key. | `export BW_SESSION="$(bw unlock --raw)"`<br>`bw unlock --passwordenv BW_PASSWORD --raw`<br>`bw unlock --check` |
+| `lock` | Lock the vault and invalidate session keys. | `bw lock` |
+| `logout` | Log out and remove the cached vault. | `bw logout` |
+| `sync` | Download the latest vault data (skipped if unchanged unless `--force`). | `bw sync`<br>`bw sync -f`<br>`bw sync --last` |
+| `status` | Server URL, last sync, user and lock state as JSON. | `bw status --pretty` |
+
+### Reading the vault
+
+| Command | Description | Examples |
+|---|---|---|
+| `list items` | List items; filter with `--search`, `--url`, `--folderid`, `--collectionid`, `--organizationid` (ids, `null` or `notnull`), `--trash`, `--archived`. | `bw list items --search github`<br>`bw list items --url https://github.com/login`<br>`bw list items --folderid null --pretty` |
+| `list folders` / `collections` / `organizations` | List folders, collections or organizations (`--search`). | `bw list folders`<br>`bw list collections --organizationid <org-id>` |
+| `list org-collections` / `org-members` | All collections or members of an organization. | `bw list org-members --organizationid <org-id>` |
+| `get item` | Get one item by id or search term (fails if the search is ambiguous). | `bw get item <id>`<br>`bw get item github --pretty` |
+| `get username` / `password` / `uri` / `notes` | Get one field of an item. | `bw get password github.com`<br>`bw get username <id>` |
+| `get totp` | Current TOTP code of a login. | `bw get totp github.com` |
+| `get exposed` | How often the item's password appears in known breaches (Have I Been Pwned, k-anonymity). | `bw get exposed github.com` |
+| `get attachment` | Download and decrypt an attachment (by id or file name). | `bw get attachment photo.jpg --itemid <id> --output ./photo.jpg`<br>`bw get attachment <att-id> --itemid <id> --raw > file` |
+| `get folder` / `collection` / `organization` / `org-collection` | Get one object by id or name. | `bw get folder Work`<br>`bw get org-collection <id> --organizationid <org-id>` |
+| `get fingerprint` | Fingerprint phrase of your or another user's public key. | `bw get fingerprint me` |
+
+### Export
+
+| Command | Description | Examples |
+|---|---|---|
+| `export` | Export the vault as `csv`, `json`, `encrypted_json` (account key, or `--password` for a password-protected file) or `zip` (JSON plus attachments). `--organizationid` exports an organization. | `bw export --format json --output ./vault.json`<br>`bw export --format encrypted_json --password`<br>`bw export --organizationid <org-id> --format json` |
+
+### Global options
+
+`--raw` (plain value only), `--pretty` (indented JSON), `--response` (JSON envelope with
+`success`), `--quiet`, `--cleanexit`, `--nointeraction`, `--session <key>`. Each has a
+`BW_*` environment variable equivalent (`BW_RAW`, `BW_PRETTY`, `BW_SESSION`, …).
 
 ## Differences from the official CLI
 
 Not implemented (not available on Vaultwarden, or not ported yet):
 
 - `device-approval` (Bitwarden-only), Key Connector, `report password-health`.
-- SSO login (`--sso`), `completion`, `update`, `sdk-version`.
+- Anything that changes the vault: `create`, `edit`, `delete`, `move`/`share`,
+  `restore`, `archive`, `confirm`, `import`, `encode`, `get template`.
+- `send`, `receive`, `generate`, `serve` (REST API), SSO login (`--sso`),
+  `completion`, `update`, `sdk-version`.
 - Data in old encryption formats (AES-CBC without HMAC, RSA with HMAC);
   login to such accounts fails with "Legacy encryption is no longer supported".
 - Two-step login other than authenticator app and email (no YubiKey OTP, Duo
   or WebAuthn).
-- Email-verified Sends (`--emails`) return a clear error.
-- Import formats other than those listed above (e.g. Chrome, Firefox,
-  LastPass, 1Password, `keepasskdbx`); `bw import --formats` lists only what
-  is supported.
-- `bw serve` on `fd+...` hostnames; `update` does not self-update.
 
 Intentional behavior differences:
 
 - When the vault is locked and interaction is allowed, a command prompts for the
   master password and unlocks **only for that command**, without invalidating
   existing session keys.
-- `bw get send <id>` works (the official CLI answers "Unknown object.").
 - Help text layout comes from cobra and differs from commander's.
-- Official bugs are not reproduced: `send get --text` with several matches
-  (stack overflow), missing keys in `serve`'s send list, and `receive`
-  accepting a wrong Send password after a cached successful access.
 
 ## Library
 
 ```go
-import (
-	"github.com/oneryx/bw"
-	"github.com/oneryx/bw/vault"
-)
+import "github.com/oneryx/bw"
 
 c, err := bw.New(bw.Options{Store: bw.FileStore("/path/to/data.json")})
 if err != nil { ... }
@@ -105,14 +134,13 @@ if !c.LoggedIn() {
 	err = c.Unlock(password) // the user key is kept in memory only
 }
 items, err := c.Items(bw.ItemFilter{Search: "github"})
-item, err := c.CreateItem(ctx, &vault.Cipher{Type: vault.TypeLogin, Name: "Example", Login: &vault.Login{...}})
+data, fileName, err := c.Export(ctx, bw.ExportOptions{Format: "json"})
 ```
 
-- `bw.Client` covers everything the CLI does: login/unlock/lock/sync, items
-  (incl. attachments, trash, archive, move to organization), folders,
-  collections, organizations and members, Sends (create, edit, receive),
-  import and export. All methods are safe for concurrent use; network calls
-  take a `context.Context`.
+- `bw.Client` covers everything the CLI does: login/unlock/lock/sync, reading
+  items (incl. attachments), folders, collections, organizations and members,
+  and export. It never changes vault data. All methods are safe for concurrent
+  use; network calls take a `context.Context`.
 - Errors are values: `bw.ErrLocked`, `bw.ErrNotFound`,
   `*bw.MultipleResultsError`, `*bw.TwoFactorRequiredError`, `*bw.APIError`, …
   Messages match the official CLI and can be shown to users.
@@ -121,9 +149,8 @@ item, err := c.CreateItem(ctx, &vault.Cipher{Type: vault.TypeLogin, Name: "Examp
 - `NewSession`/`UnlockWithSession` provide the CLI's `BW_SESSION` mechanism if
   several processes need to share an unlocked vault.
 - `github.com/oneryx/bw/vault` holds the data model (`vault.Cipher`,
-  `vault.Folder`, `vault.DecryptedSend`, …), search and URI matching;
-  `github.com/oneryx/bw/generator` and `github.com/oneryx/bw/totp` generate
-  passwords/passphrases and TOTP codes.
+  `vault.Folder`, `vault.Collection`, …), search and URI matching;
+  `github.com/oneryx/bw/totp` generates TOTP codes.
 
 The CLI (`internal/cli`) is a thin layer over this API that adds prompts,
 flags and output formatting.

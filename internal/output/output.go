@@ -85,12 +85,6 @@ func Template(t any) Response {
 	return Success(TemplateResponse{Object: "template", Template: t})
 }
 
-// FileResponse carries binary content (attachments) for `bw serve`.
-type FileResponse struct {
-	Data     []byte
-	FileName string
-}
-
 // Printer writes responses according to Options.
 type Printer struct {
 	Opts   Options

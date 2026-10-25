@@ -18,15 +18,10 @@ import (
 
 func isGUID(s string) bool { return bw.IsGUID(s) }
 
-// validateObject mirrors the official "Unknown object" check. `bw serve`
-// skips the program-level validation and reports the command's own message.
+// validateObject mirrors the official "Unknown object" check.
 func validateObject(obj string, valid []string) *output.Response {
 	if slices.Contains(valid, obj) {
 		return nil
-	}
-	if serveMode {
-		r := output.Error("Unknown object.")
-		return &r
 	}
 	r := output.Error(`Unknown object "%s". Allowed objects are: %s.`, obj, strings.Join(valid, ", "))
 	return &r
@@ -181,16 +176,6 @@ func (a *App) runGet(cmd *cobra.Command, args []string) output.Response {
 	if r := validateObject(obj, getObjects); r != nil {
 		return *r
 	}
-	if strings.ToLower(obj) == "template" {
-		t, ok := vault.Templates[strings.ToLower(id)]
-		if !ok {
-			if id == "send.file" || id == "send.text" {
-				return output.Error("Invalid template object. Use `bw send template %s` instead.", id)
-			}
-			return output.Error("Unknown template object.")
-		}
-		return output.Template(t)
-	}
 	c, err := a.requireUnlocked()
 	if err != nil {
 		return errResp(err)
@@ -294,8 +279,6 @@ func (a *App) runGet(cmd *cobra.Command, args []string) output.Response {
 			return errResp(err)
 		}
 		return output.String(phrase)
-	case "send":
-		return a.sendGet(c, args[1], "", false)
 	}
 	return output.Error("Unknown object.")
 }
@@ -405,9 +388,6 @@ func (a *App) getAttachment(c *bw.Client, id, itemID, outPath string) output.Res
 
 // saveResultToFile mirrors CliUtils.saveResultToFile.
 func (a *App) saveResultToFile(data []byte, outPath, defaultName string) output.Response {
-	if a.serve {
-		return output.Success(output.FileResponse{Data: data, FileName: defaultName})
-	}
 	if outPath == "" && a.opts.Raw {
 		os.Stdout.Write(data)
 		return output.Success(nil)

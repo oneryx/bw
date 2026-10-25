@@ -1,7 +1,6 @@
 package vault
 
 import (
-	"encoding/json"
 	"time"
 )
 
@@ -317,19 +316,4 @@ type OrgMemberResponse struct {
 	Status           int     `json:"status"`
 	Type             int     `json:"type"`
 	TwoFactorEnabled bool    `json:"twoFactorEnabled"`
-}
-
-// Templates returned by `bw get template <object>`, verbatim from the official CLI.
-var Templates = map[string]json.RawMessage{
-	"item":             json.RawMessage(`{"type":1,"name":"Item name","favorite":false,"reprompt":0,"notes":"Some notes about this item.","fields":[],"passwordHistory":[]}`),
-	"item.field":       json.RawMessage(`{"type":0,"name":"Field name","value":"Some value"}`),
-	"item.login":       json.RawMessage(`{"uris":[],"username":"jdoe","password":"myp@ssword123","totp":"JBSWY3DPEHPK3PXP","fido2Credentials":[]}`),
-	"item.login.uri":   json.RawMessage(`{"uri":"https://google.com"}`),
-	"item.card":        json.RawMessage(`{"cardholderName":"John Doe","brand":"visa","number":"4242424242424242","expMonth":"04","expYear":"2023","code":"123"}`),
-	"item.identity":    json.RawMessage(`{"title":"Mr","firstName":"John","middleName":"William","lastName":"Doe","address1":"123 Any St","address2":"Apt #123","city":"New York","state":"NY","postalCode":"10001","country":"US","company":"Acme Inc.","email":"john@company.com","phone":"5555551234","ssn":"000-123-4567","username":"jdoe","passportNumber":"US-123456789","licenseNumber":"D123-12-123-12333"}`),
-	"item.securenote":  json.RawMessage(`{"type":0}`),
-	"folder":           json.RawMessage(`{"name":"Folder name"}`),
-	"collection":       json.RawMessage(`{"organizationId":"00000000-0000-0000-0000-000000000000","name":"Collection name","externalId":null}`),
-	"item-collections": json.RawMessage(`["collection-id1","collection-id2"]`),
-	"org-collection":   json.RawMessage(`{"organizationId":"00000000-0000-0000-0000-000000000000","name":"Collection name","externalId":null,"groups":[{"id":"00000000-0000-0000-0000-000000000000","readOnly":false,"hidePasswords":false,"manage":false},{"id":"00000000-0000-0000-0000-000000000000","readOnly":false,"hidePasswords":false,"manage":false}],"users":[{"id":"00000000-0000-0000-0000-000000000000","readOnly":false,"hidePasswords":false,"manage":false},{"id":"00000000-0000-0000-0000-000000000000","readOnly":false,"hidePasswords":false,"manage":false}]}`),
 }

@@ -4,10 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
-	"net/http"
-	"strings"
 
-	"github.com/oneryx/bw/internal/api"
 	"github.com/oneryx/bw/internal/crypto"
 	"github.com/oneryx/bw/vault"
 )
@@ -126,84 +123,6 @@ func (c *Client) OrgCollection(ctx context.Context, orgID, id string) (*OrgColle
 	}, nil
 }
 
-// SaveOrgCollection creates (empty ID) or updates an organization
-// collection. When creating with nil Users, the current member gets manage
-// access.
-func (c *Client) SaveOrgCollection(ctx context.Context, col OrgCollection) (*OrgCollection, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	v, err := c.open()
-	if err != nil {
-		return nil, err
-	}
-	if strings.TrimSpace(col.Name) == "" {
-		return nil, errors.New("Collection name is required.")
-	}
-	orgID := col.OrganizationID
-	key, err := v.OrgKey(orgID)
-	if err != nil {
-		return nil, ErrNoOrgKey
-	}
-	name, err := crypto.EncryptString(key, col.Name)
-	if err != nil {
-		return nil, err
-	}
-	cl := c.api()
-	users := col.Users
-	if users == nil && col.ID == "" {
-		var orgs struct {
-			Data []struct {
-				ID                 string `json:"id"`
-				OrganizationUserID string `json:"organizationUserId"`
-			} `json:"data"`
-		}
-		if err := cl.Get(ctx, "/organizations", &orgs); err == nil {
-			for _, o := range orgs.Data {
-				if o.ID == orgID && o.OrganizationUserID != "" {
-					users = []vault.SelectionReadOnly{{ID: o.OrganizationUserID, Manage: true}}
-				}
-			}
-		}
-	}
-	body := map[string]any{"name": name, "externalId": col.ExternalID, "groups": col.Groups, "users": users}
-	var res struct {
-		ID     string                    `json:"id"`
-		Groups []vault.SelectionReadOnly `json:"groups"`
-		Users  []vault.SelectionReadOnly `json:"users"`
-	}
-	path, method := "/organizations/"+orgID+"/collections", http.MethodPost
-	if col.ID != "" {
-		path, method = path+"/"+col.ID, http.MethodPut
-	}
-	if err := cl.Do(ctx, method, path, body, &res); err != nil {
-		return nil, err
-	}
-	if res.Groups == nil {
-		res.Groups = []vault.SelectionReadOnly{}
-	}
-	if res.Users == nil {
-		res.Users = []vault.SelectionReadOnly{}
-	}
-	return &OrgCollection{
-		ID: res.ID, OrganizationID: orgID, Name: col.Name, ExternalID: col.ExternalID,
-		Groups: res.Groups, Users: res.Users,
-	}, nil
-}
-
-// DeleteOrgCollection deletes an organization collection.
-func (c *Client) DeleteOrgCollection(ctx context.Context, orgID, id string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if _, err := c.open(); err != nil {
-		return err
-	}
-	if err := c.api().Do(ctx, http.MethodDelete, "/organizations/"+orgID+"/collections/"+id, nil, nil); err != nil {
-		return err
-	}
-	_ = c.st.Account.DeleteVaultObject("collections", id)
-	return c.save()
-}
-
 // OrgMember is a member of an organization.
 type OrgMember struct {
 	ID               string
@@ -243,63 +162,6 @@ func (c *Client) OrgMembers(ctx context.Context, orgID string) ([]OrgMember, err
 		out = append(out, OrgMember(u))
 	}
 	return out, nil
-}
-
-// ConfirmOrgMember confirms an accepted member, sharing the organization key
-// with them. Check the member's Fingerprint out of band first.
-func (c *Client) ConfirmOrgMember(ctx context.Context, orgID, memberID string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	v, err := c.open()
-	if err != nil {
-		return err
-	}
-	orgKey, err := v.OrgKey(orgID)
-	if err != nil {
-		return ErrNoOrgKey
-	}
-	cl := c.api()
-	var member struct {
-		UserID string `json:"userId"`
-		Status int    `json:"status"`
-	}
-	if err := cl.Get(ctx, "/organizations/"+orgID+"/users/"+memberID, &member); err != nil {
-		if api.IsNotFound(err) {
-			return errors.New("Member id does not exist for this organization.")
-		}
-		return err
-	}
-	switch member.Status {
-	case OrgMemberAccepted:
-	case OrgMemberInvited:
-		return errors.New("User must accept the invitation before they can be confirmed.")
-	case OrgMemberConfirmed:
-		return errors.New("User is already confirmed.")
-	case OrgMemberRevoked:
-		return errors.New("User is revoked and cannot be confirmed.")
-	default:
-		return errors.New("User is not in a valid state to be confirmed.")
-	}
-	var pk struct {
-		PublicKey string `json:"publicKey"`
-	}
-	if err := cl.Get(ctx, "/users/"+member.UserID+"/public-key", &pk); err != nil {
-		return err
-	}
-	pub, err := base64.StdEncoding.DecodeString(pk.PublicKey)
-	if err != nil {
-		return err
-	}
-	wrapped, err := crypto.EncryptRSA(pub, orgKey.Bytes())
-	if err != nil {
-		return err
-	}
-	collName, err := crypto.EncryptString(orgKey, "My items")
-	if err != nil {
-		return err
-	}
-	body := map[string]string{"key": wrapped, "defaultUserCollectionName": collName}
-	return cl.Do(ctx, http.MethodPost, "/organizations/"+orgID+"/users/"+memberID+"/confirm", body, nil)
 }
 
 // Fingerprint returns the fingerprint phrase of a user's public key; use

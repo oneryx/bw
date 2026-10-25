@@ -17,7 +17,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -31,6 +30,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/oneryx/bw/internal/crypto"
 	"github.com/oneryx/bw/internal/testutil"
 )
 
@@ -154,9 +154,10 @@ func TestMain(m *testing.M) {
 
 // cli is a bw instance with its own data directory and session.
 type cli struct {
-	t       *testing.T
-	dir     string
-	session string
+	t               *testing.T
+	dir             string
+	session         string
+	email, password string
 }
 
 func newCLI(t *testing.T) *cli {
@@ -206,17 +207,13 @@ func (c *cli) json(v any, args ...string) {
 	}
 }
 
-func enc(v any) string {
-	b, _ := json.Marshal(v)
-	return base64.StdEncoding.EncodeToString(b)
-}
-
 func account(t *testing.T, email, password string) *cli {
 	t.Helper()
 	if err := testutil.Register(serverURL, email, password); err != nil {
 		t.Fatal(err)
 	}
 	c := newCLI(t)
+	c.email, c.password = email, password
 	c.session = c.ok("login", email, password, "--raw")
 	if len(c.session) != 88 {
 		t.Fatalf("unexpected session %q", c.session)
@@ -244,18 +241,33 @@ func TestAuthLifecycle(t *testing.T) {
 	c.fail("You are not logged in.", "list", "items")
 }
 
-func TestItemsFoldersAndHistory(t *testing.T) {
-	c := account(t, "items@example.com", "Items-Pass-1")
-	var folder map[string]any
-	c.json(&folder, "create", "folder", enc(map[string]string{"name": "Work"}))
-	item := map[string]any{"type": 1, "name": "GitHub", "folderId": folder["id"], "notes": "n",
-		"login": map[string]any{"username": "alice", "password": "pw1", "uris": []map[string]any{{"uri": "https://github.com/login"}},
-			"totp": "JBSWY3DPEHPK3PXP"}}
-	var created map[string]any
-	c.json(&created, "create", "item", enc(item))
-	id := created["id"].(string)
+// seed fills the account's vault with testutil.Session.Seed data and syncs.
+func (c *cli) seed() {
+	c.t.Helper()
+	s, err := testutil.Login(serverURL, c.email, c.password)
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	if err := s.Seed(); err != nil {
+		c.t.Fatal(err)
+	}
+	c.ok("sync")
+}
 
-	if pw := c.ok("get", "password", "github.com"); pw != "pw1" {
+// itemID returns the id of the item with the given name.
+func (c *cli) itemID(name string) string {
+	c.t.Helper()
+	var it map[string]any
+	c.json(&it, "get", "item", name)
+	return it["id"].(string)
+}
+
+func TestReadItems(t *testing.T) {
+	c := account(t, "items@example.com", "Items-Pass-1")
+	c.seed()
+	id := c.itemID("GitHub")
+
+	if pw := c.ok("get", "password", "github.com"); pw != "pw2" {
 		t.Fatalf("password %q", pw)
 	}
 	if u := c.ok("get", "username", id); u != "alice" {
@@ -264,134 +276,107 @@ func TestItemsFoldersAndHistory(t *testing.T) {
 	if totp := c.ok("get", "totp", "GitHub"); len(totp) != 6 {
 		t.Fatalf("totp %q", totp)
 	}
+	if n := c.ok("get", "notes", "Doc"); n != "secret note" {
+		t.Fatalf("notes %q", n)
+	}
+	var item map[string]any
+	c.json(&item, "get", "item", id)
+	if hist := item["passwordHistory"].([]any); len(hist) != 1 || hist[0].(map[string]any)["password"] != "pw1" {
+		t.Fatalf("history %v", hist)
+	}
+	var folder map[string]any
+	c.json(&folder, "get", "folder", "Work")
 	var list []map[string]any
 	c.json(&list, "list", "items", "--folderid", folder["id"].(string))
 	if len(list) != 1 {
 		t.Fatalf("folder filter: %d", len(list))
 	}
+	c.json(&list, "list", "items", "--folderid", "null")
+	if len(list) != 2 {
+		t.Fatalf("no-folder filter: %d", len(list))
+	}
 	c.json(&list, "list", "items", "--url", "https://github.com/settings")
 	if len(list) != 1 {
 		t.Fatalf("url filter: %d", len(list))
 	}
-
-	created["login"].(map[string]any)["password"] = "pw2"
-	var edited map[string]any
-	c.json(&edited, "edit", "item", id, enc(created))
-	hist := edited["passwordHistory"].([]any)
-	if len(hist) != 1 || hist[0].(map[string]any)["password"] != "pw1" {
-		t.Fatalf("history %v", hist)
-	}
-
-	c.ok("delete", "item", id)
-	c.json(&list, "list", "items", "--trash")
-	if len(list) != 1 {
-		t.Fatalf("trash: %d", len(list))
-	}
-	c.fail("You may not edit a deleted item.", "edit", "item", id, enc(created))
-	c.ok("restore", "item", id)
-	c.ok("delete", "item", id, "--permanent")
-	c.fail("Not found.", "get", "item", id)
-}
-
-func TestAttachmentsAndSends(t *testing.T) {
-	c := account(t, "files@example.com", "Files-Pass-1")
-	var item map[string]any
-	c.json(&item, "create", "item", enc(map[string]any{"type": 2, "name": "Doc", "secureNote": map[string]int{"type": 0}}))
-	file := filepath.Join(t.TempDir(), "hello.txt")
-	content := strings.Repeat("attachment-data-", 1000)
-	_ = os.WriteFile(file, []byte(content), 0o600)
-	c.ok("create", "attachment", "--file", file, "--itemid", item["id"].(string))
-	if got := c.ok("get", "attachment", "hello.txt", "--itemid", item["id"].(string), "--raw"); got != content {
-		t.Fatalf("attachment roundtrip mismatch (%d bytes)", len(got))
-	}
-
-	var send map[string]any
-	c.json(&send, "send", "-n", "Secret", "--password", "spw", "top secret")
-	other := newCLI(t)
-	other.fail("Password required", "receive", send["accessUrl"].(string))
-	if got := other.ok("receive", send["accessUrl"].(string), "--password", "spw"); got != "top secret" {
-		t.Fatalf("receive %q", got)
-	}
-	other.fail("Invalid password", "receive", send["accessUrl"].(string), "--password", "nope")
-	c.ok("send", "delete", send["id"].(string))
-}
-
-func TestExportImportRoundTrip(t *testing.T) {
-	a := account(t, "exp@example.com", "Exp-Pass-1")
-	a.ok("create", "folder", enc(map[string]string{"name": "F"}))
-	a.ok("create", "item", enc(map[string]any{"type": 1, "name": "L", "login": map[string]any{"username": "u", "password": "p"}}))
-	a.ok("create", "item", enc(map[string]any{"type": 3, "name": "C", "card": map[string]any{"number": "4111111111111111"}}))
-	dir := t.TempDir()
-	plain := filepath.Join(dir, "plain.json")
-	protected := filepath.Join(dir, "protected.json")
-	a.ok("export", "--format", "json", "--output", plain)
-	a.ok("export", "--format", "encrypted_json", "--password", "filepw", "--output", protected)
-
-	b := account(t, "imp@example.com", "Imp-Pass-1")
-	b.ok("import", "bitwardenjson", plain)
-	pwFile := filepath.Join(dir, "pw")
-	_ = os.WriteFile(pwFile, []byte("filepw\n"), 0o600)
-	b.ok("import", "bitwardenjson", protected, "--passwordfile", pwFile)
-	var items []map[string]any
-	b.json(&items, "list", "items")
-	if len(items) != 4 {
-		t.Fatalf("expected 4 imported items, got %d", len(items))
-	}
-	var folders []map[string]any
-	b.json(&folders, "list", "folders")
-	if len(folders) != 3 { // F twice (different exports) + No Folder
-		t.Fatalf("folders %v", folders)
+	c.fail("Not found.", "get", "item", "nothing-matches-this")
+	for _, cmd := range []string{"create", "edit", "delete", "import"} {
+		c.fail("Invalid command: "+cmd, cmd, "item", "x")
 	}
 }
 
-func TestServe(t *testing.T) {
-	c := account(t, "serve@example.com", "Serve-Pass-1")
-	port := freePort()
-	cmd := exec.Command(bwBinary, "serve", "--port", fmt.Sprint(port))
-	cmd.Env = append(os.Environ(), "BITWARDENCLI_APPDATA_DIR="+c.dir, "SSL_CERT_FILE="+certFile, "BW_SESSION="+c.session)
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	defer cmd.Process.Kill()
-	base := fmt.Sprintf("http://127.0.0.1:%d", port)
-	var resp *http.Response
-	var err error
-	for range 50 {
-		if resp, err = http.Get(base + "/status"); err == nil {
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
+func TestAttachments(t *testing.T) {
+	const email, password = "files@example.com", "Files-Pass-1"
+	c := account(t, email, password)
+	c.seed()
+	id := c.itemID("Doc")
+	s, err := testutil.Login(serverURL, email, password)
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
-	post := func(path string, body any) map[string]any {
-		b, _ := json.Marshal(body)
-		r, err := http.Post(base+path, "application/json", bytes.NewReader(b))
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer r.Body.Close()
-		var out map[string]any
-		_ = json.NewDecoder(r.Body).Decode(&out)
-		return out
+	content := strings.Repeat("attachment-data-", 1000)
+	if err := s.AddAttachment(id, "hello.txt", []byte(content)); err != nil {
+		t.Fatal(err)
 	}
-	if r := post("/object/folder", map[string]string{"name": "Via API"}); r["success"] != true {
-		t.Fatalf("create folder: %v", r)
+	c.ok("sync")
+	if got := c.ok("get", "attachment", "hello.txt", "--itemid", id, "--raw"); got != content {
+		t.Fatalf("attachment mismatch (%d bytes)", len(got))
 	}
-	if r := post("/lock", nil); r["success"] != true {
-		t.Fatalf("lock: %v", r)
+}
+
+func TestExport(t *testing.T) {
+	a := account(t, "exp@example.com", "Exp-Pass-1")
+	a.seed()
+	dir := t.TempDir()
+
+	var plain struct {
+		Folders []struct{ Name string } `json:"folders"`
+		Items   []struct {
+			Name  string `json:"name"`
+			Login *struct {
+				Password string `json:"password"`
+			} `json:"login"`
+		} `json:"items"`
 	}
-	if r := post("/object/folder", map[string]string{"name": "x"}); r["success"] != false || r["message"] != "Vault is locked." {
-		t.Fatalf("expected locked: %v", r)
+	file := filepath.Join(dir, "plain.json")
+	a.ok("export", "--format", "json", "--output", file)
+	readJSON(t, file, &plain)
+	if len(plain.Folders) != 1 || len(plain.Items) != 3 {
+		t.Fatalf("plain export: %+v", plain)
 	}
-	if r := post("/unlock", map[string]string{"password": "Serve-Pass-1"}); r["success"] != true {
-		t.Fatalf("unlock: %v", r)
+
+	var protected struct {
+		PasswordProtected bool   `json:"passwordProtected"`
+		Salt              string `json:"salt"`
+		KdfType           int    `json:"kdfType"`
+		KdfIterations     int    `json:"kdfIterations"`
+		Data              string `json:"data"`
 	}
-	req, _ := http.NewRequest(http.MethodGet, base+"/status", nil)
-	req.Header.Set("Origin", "https://evil.example")
-	if r, err := http.DefaultClient.Do(req); err != nil || r.StatusCode != http.StatusForbidden {
-		t.Fatalf("origin protection: %v %v", r, err)
+	file = filepath.Join(dir, "protected.json")
+	a.ok("export", "--format", "encrypted_json", "--password", "filepw", "--output", file)
+	readJSON(t, file, &protected)
+	km, err := crypto.DeriveKDF([]byte("filepw"), []byte(protected.Salt), crypto.KDFParams{Type: protected.KdfType, Iterations: protected.KdfIterations})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clear, err := crypto.DecryptString(crypto.StretchKey(km), protected.Data)
+	if err != nil || !protected.PasswordProtected || !strings.Contains(clear, `"password": "pw2"`) {
+		t.Fatalf("protected export: %v", err)
+	}
+
+	csv := a.ok("export", "--format", "csv", "--output", filepath.Join(dir, "x.csv"))
+	if !strings.HasPrefix(csv, "Saved ") {
+		t.Fatalf("csv export: %q", csv)
+	}
+}
+
+func readJSON(t *testing.T, file string, v any) {
+	t.Helper()
+	b, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(b, v); err != nil {
+		t.Fatal(err)
 	}
 }

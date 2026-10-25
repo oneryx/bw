@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,9 +19,6 @@ var stdinReader = bufio.NewReader(os.Stdin)
 
 // prompt asks for a line of input on stderr, like inquirer's input prompt.
 func prompt(msg string) string {
-	if serveMode {
-		return ""
-	}
 	fmt.Fprint(os.Stderr, "? "+msg+" ")
 	line, _ := stdinReader.ReadString('\n')
 	return strings.TrimRight(line, "\r\n")
@@ -28,9 +26,6 @@ func prompt(msg string) string {
 
 // promptSecret asks for hidden input when stdin is a terminal.
 func promptSecret(msg string) string {
-	if serveMode {
-		return ""
-	}
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
 		return prompt(msg)
 	}
@@ -76,16 +71,20 @@ func (a *App) getPassword(password, passwordFile, passwordEnv, promptMsg string)
 	return password, nil
 }
 
-// dataDir returns the data directory, honoring BITWARDENCLI_APPDATA_DIR.
+// dataDir returns the directory of data.json: BITWARDENCLI_APPDATA_DIR if
+// set, otherwise the directory of the bw binary (symlinks resolved).
 func dataDir() (string, error) {
 	if d := os.Getenv("BITWARDENCLI_APPDATA_DIR"); d != "" {
 		return filepath.Abs(d)
 	}
-	cfg, err := os.UserConfigDir()
+	exe, err := os.Executable()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(cfg, "Bitwarden CLI-go"), nil
+	if exe, err = filepath.EvalSymlinks(exe); err != nil {
+		return "", err
+	}
+	return filepath.Dir(exe), nil
 }
 
 // client lazily opens the library client on data.json.
@@ -105,6 +104,9 @@ func (a *App) client() (*bw.Client, error) {
 		opts.DebugLog = os.Stderr
 	}
 	c, err := bw.New(opts)
+	if errors.Is(err, fs.ErrPermission) {
+		return nil, fmt.Errorf("%w\nCannot write data.json in %s; move bw to a writable directory or set BITWARDENCLI_APPDATA_DIR.", err, dir)
+	}
 	if err != nil {
 		return nil, err
 	}

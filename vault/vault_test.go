@@ -79,21 +79,3 @@ func TestUnparseCSV(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
-
-func TestUpdatePasswordHistory(t *testing.T) {
-	orig := &Cipher{Type: TypeLogin, Login: &Login{Password: s("old")},
-		Fields:          []Field{{Type: 1, Name: s("pin"), Value: s("1")}},
-		PasswordHistory: []PasswordHistory{{Password: "h1"}, {Password: "h2"}, {Password: "h3"}, {Password: "h4"}}}
-	next := &Cipher{Type: TypeLogin, Login: &Login{Password: s("new")}, Fields: []Field{{Type: 1, Name: s("pin"), Value: s("2")}}}
-	UpdatePasswordHistory(next, orig)
-	var got []string
-	for _, h := range next.PasswordHistory {
-		got = append(got, h.Password)
-	}
-	if strings.Join(got, ",") != "pin: 1,old,h1,h2,h3" {
-		t.Fatalf("got %v", got)
-	}
-	if next.Login.PasswordRevisionDate == nil {
-		t.Fatal("revision date not set")
-	}
-}

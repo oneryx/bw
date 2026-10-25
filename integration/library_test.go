@@ -12,7 +12,6 @@ import (
 	"github.com/oneryx/bw"
 	"github.com/oneryx/bw/internal/testutil"
 	"github.com/oneryx/bw/totp"
-	"github.com/oneryx/bw/vault"
 )
 
 // TestLibrary drives bw.Client directly, the way a GUI client would.
@@ -43,42 +42,40 @@ func TestLibrary(t *testing.T) {
 		t.Fatalf("status %+v", s)
 	}
 
-	folder, err := c.CreateFolder(ctx, "Work")
+	s, err := testutil.Login(serverURL, email, password)
 	if err != nil {
 		t.Fatal(err)
 	}
-	pw, user, uri := "pw1", "alice", "https://github.com/login"
-	item, err := c.CreateItem(ctx, &vault.Cipher{
-		Type: vault.TypeLogin, Name: "GitHub", FolderID: &folder.ID,
-		Login: &vault.Login{Username: &user, Password: &pw, URIs: []vault.LoginURI{{URI: &uri}}},
-	})
-	if err != nil {
+	if err := s.Seed(); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Sync(ctx, false); err != nil {
 		t.Fatal(err)
 	}
 	found, err := c.FindItem("github", nil)
-	if err != nil || found.ID != item.ID || *found.Login.Password != "pw1" {
+	if err != nil || *found.Login.Password != "pw2" || len(found.PasswordHistory) != 1 {
 		t.Fatalf("find: %v %+v", err, found)
 	}
 	if items, err := c.Items(bw.ItemFilter{URL: "https://github.com/settings"}); err != nil || len(items) != 1 {
 		t.Fatalf("url filter: %v %d", err, len(items))
 	}
-	pw2 := "pw2"
-	found.Login.Password = &pw2
-	updated, err := c.UpdateItem(ctx, found)
-	if err != nil {
+	if folders, err := c.Folders(); err != nil || len(folders) != 1 || folders[0].Name != "Work" {
+		t.Fatalf("folders: %v %+v", err, folders)
+	}
+	if _, err := c.FindItem("does-not-exist", nil); !errors.Is(err, bw.ErrNotFound) {
+		t.Fatalf("want ErrNotFound, got %v", err)
+	}
+	if err := s.AddAttachment(found.ID, "a.txt", []byte("hello")); err != nil {
 		t.Fatal(err)
 	}
-	if len(updated.PasswordHistory) != 1 || updated.PasswordHistory[0].Password != "pw1" {
-		t.Fatalf("history %+v", updated.PasswordHistory)
-	}
-	if _, err := c.AddAttachment(ctx, item.ID, "a.txt", []byte("hello")); err != nil {
+	if err := c.Sync(ctx, true); err != nil {
 		t.Fatal(err)
 	}
-	withAtt, err := c.Item(item.ID)
+	withAtt, err := c.Item(found.ID)
 	if err != nil || len(withAtt.Attachments) != 1 {
 		t.Fatalf("attachment: %v", err)
 	}
-	if data, err := c.Attachment(ctx, item.ID, withAtt.Attachments[0].ID); err != nil || string(data) != "hello" {
+	if data, err := c.Attachment(ctx, found.ID, withAtt.Attachments[0].ID); err != nil || string(data) != "hello" {
 		t.Fatalf("attachment content %q %v", data, err)
 	}
 
@@ -97,25 +94,8 @@ func TestLibrary(t *testing.T) {
 	if err := other.UnlockWithSession(session); err != nil {
 		t.Fatal(err)
 	}
-	if items, err := other.Items(bw.ItemFilter{}); err != nil || len(items) != 1 {
+	if items, err := other.Items(bw.ItemFilter{}); err != nil || len(items) != 3 {
 		t.Fatalf("other client items: %v %d", err, len(items))
-	}
-
-	text := "top secret"
-	s, err := c.CreateSend(ctx, &vault.DecryptedSend{Send: vault.Send{
-		Type: vault.SendTypeText, Name: "S", Text: &vault.SendText{Text: &text},
-		DeletionDate: time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
-	}}, "spw", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	url := c.SendBaseURL() + s.AccessID + "/" + vault.URLKey(s.KeyMaterial)
-	if _, err := c.ReceiveSend(ctx, url, bw.ReceiveOptions{}); !errors.Is(err, bw.ErrSendPasswordRequired) {
-		t.Fatalf("want ErrSendPasswordRequired, got %v", err)
-	}
-	got, err := c.ReceiveSend(ctx, url, bw.ReceiveOptions{Password: "spw"})
-	if err != nil || *got.Text.Text != text {
-		t.Fatalf("receive: %v", err)
 	}
 
 	data, name, err := c.Export(ctx, bw.ExportOptions{Format: "json"})

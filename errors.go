@@ -21,17 +21,6 @@ var (
 	ErrOrgNotFound = errors.New("Organization not found.")
 	// ErrTwoFactorFailed is returned when the two-step login code was rejected.
 	ErrTwoFactorFailed = errors.New("Login failed.")
-	// ErrSendPasswordRequired is returned by ReceiveSend for password
-	// protected Sends when no password was given.
-	ErrSendPasswordRequired = errors.New("Password required")
-	// ErrSendInvalidPassword is returned by ReceiveSend for a wrong password.
-	ErrSendInvalidPassword = errors.New("Invalid password")
-	// ErrSendEmailVerification is returned by ReceiveSend for Sends that
-	// require email verification, which is not supported.
-	ErrSendEmailVerification = errors.New("Email-verified Sends are not supported by this CLI.")
-	// ErrSendForeignHost is returned by ReceiveSend when the Send is hosted
-	// on another server and ReceiveOptions.AllowForeignHost is not set.
-	ErrSendForeignHost = errors.New("Send access will not be attempted: the domain in the Send URL does not match the configured domain.")
 )
 
 // APIError is an error response from the server.

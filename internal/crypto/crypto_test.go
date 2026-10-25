@@ -2,7 +2,6 @@ package crypto
 
 import (
 	"bytes"
-	"encoding/base64"
 	"testing"
 )
 
@@ -36,19 +35,6 @@ func TestStretchKey(t *testing.T) {
 	mac := []byte{221, 127, 206, 234, 101, 27, 202, 38, 86, 52, 34, 28, 78, 28, 185, 16, 48, 61, 127, 166, 209, 247, 194, 87, 232, 26, 48, 85, 193, 249, 179, 155}
 	if !bytes.Equal(k.Enc, enc) || !bytes.Equal(k.Mac, mac) {
 		t.Fatalf("got %v %v", k.Enc, k.Mac)
-	}
-}
-
-func TestShareableKey(t *testing.T) {
-	cases := []struct{ secret, info, want string }{
-		{"&/$%F1a895g67HlX", "", "4PV6+PcmF2w7YHRatvyMcVQtI7zvCyssv/wFWmzjiH6Iv9altjmDkuBD1aagLVaLezbthbSe+ktR+U6qswxNnQ=="},
-		{"67t9b5g67$%Dh89n", "test", "F9jVQmrACGx9VUPjuzfMYDjr726JtL300Y3Yg+VYUnVQtQ1s8oImJ5xtp1KALC9h2nav04++1LDW4iFD+infng=="},
-	}
-	for _, c := range cases {
-		got := base64.StdEncoding.EncodeToString(ShareableKey([]byte(c.secret), "test_key", c.info).Bytes())
-		if got != c.want {
-			t.Errorf("info %q: got %s", c.info, got)
-		}
 	}
 }
 

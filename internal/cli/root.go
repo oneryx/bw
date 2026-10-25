@@ -22,10 +22,6 @@ type App struct {
 	noInteraction bool
 	exitCode      int
 
-	// serve mode: responses are captured instead of printed.
-	serve    bool
-	captured *output.Response
-
 	bw *bw.Client
 }
 
@@ -65,20 +61,10 @@ func (a *App) newRootCmd() *cobra.Command {
   bw list items --search google
   bw get item 99ee88d2-6046-4ea7-92c2-acac464b1412
   bw get password google.com
-  echo '{"name":"My Folder"}' | bw encode
-  bw create folder eyJuYW1lIjoiTXkgRm9sZGVyIn0K
-  bw edit folder c7c7b60b-9c61-40f2-8ccd-36c49595ed72 eyJuYW1lIjoiTXkgRm9sZGVyMiJ9Cg==
-  bw delete item 99ee88d2-6046-4ea7-92c2-acac464b1412
-  bw generate -lusn --length 18
-  bw config server https://bitwarden.example.com
-  bw send -f ./file.ext
-  bw send "text to send"
-  echo "text to send" | bw send
-  bw receive https://vault.bitwarden.com/#/send/rg3iuoS_Akm2gqy6ADRHmg/Ht7dYjsqjmgqUM3rjzZDSQ`,
+  bw export --format json --output ./vault.json
+  bw config server https://bitwarden.example.com`,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			if !a.serve {
-				a.loadGlobals(cmd)
-			}
+			a.loadGlobals(cmd)
 			return nil
 		},
 	}
@@ -96,11 +82,9 @@ func (a *App) newRootCmd() *cobra.Command {
 
 	root.AddCommand(
 		a.loginCmd(), a.logoutCmd(), a.lockCmd(), a.unlockCmd(), a.syncCmd(),
-		a.generateCmd(), a.encodeCmd(), a.configCmd(), a.statusCmd(),
-		a.listCmd(), a.getCmd(), a.createCmd(), a.editCmd(), a.deleteCmd(),
-		a.archiveCmd(), a.restoreCmd(), a.moveCmd(false), a.moveCmd(true),
-		a.confirmCmd(), a.importCmd(), a.exportCmd(),
-		a.sendCmd(), a.receiveCmd(), a.serveCmd(),
+		a.configCmd(), a.statusCmd(),
+		a.listCmd(), a.getCmd(),
+		a.exportCmd(),
 	)
 	return root
 }
@@ -128,10 +112,6 @@ func (a *App) loadGlobals(cmd *cobra.Command) {
 
 // print writes a response and records the exit code.
 func (a *App) print(r output.Response) {
-	if a.serve {
-		a.captured = &r
-		return
-	}
 	a.exitCode = output.NewPrinter(a.opts).Print(r)
 }
 

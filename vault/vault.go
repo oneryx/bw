@@ -2,8 +2,6 @@ package vault
 
 import (
 	"crypto/rsa"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -30,10 +28,9 @@ type SyncData struct {
 			} `json:"publicKeyEncryptionKeyPair"`
 		} `json:"accountKeys"`
 	} `json:"profile"`
-	Folders     []Folder          `json:"folders"`
-	Collections []Collection      `json:"collections"`
-	Ciphers     []Cipher          `json:"ciphers"`
-	Sends       []json.RawMessage `json:"sends"`
+	Folders     []Folder     `json:"folders"`
+	Collections []Collection `json:"collections"`
+	Ciphers     []Cipher     `json:"ciphers"`
 	Domains     *struct {
 		EquivalentDomains       [][]string `json:"equivalentDomains"`
 		GlobalEquivalentDomains []struct {
@@ -213,31 +210,4 @@ func (v *Vault) Organizations() []ProfileOrganization {
 	out := append([]ProfileOrganization(nil), v.Data.Profile.Organizations...)
 	sortBy(out, func(o ProfileOrganization) string { return o.Name })
 	return out
-}
-
-// EncryptCipher returns an encrypted copy of a decrypted cipher, using its
-// per-item key when present. URI checksums are recomputed.
-func (v *Vault) EncryptCipher(c *Cipher) (*Cipher, error) {
-	out := c.Clone()
-	if out.Login != nil {
-		for i := range out.Login.URIs {
-			u := &out.Login.URIs[i]
-			u.URIChecksum = nil
-			if u.URI != nil {
-				sum := sha256.Sum256([]byte(*u.URI))
-				s := base64.StdEncoding.EncodeToString(sum[:])
-				u.URIChecksum = &s
-			}
-		}
-	}
-	key, err := v.CipherKey(out)
-	if err != nil {
-		return nil, err
-	}
-	err = out.strings(func(p *string) error {
-		e, err := crypto.EncryptString(key, *p)
-		*p = e
-		return err
-	})
-	return out, err
 }
