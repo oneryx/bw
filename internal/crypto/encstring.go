@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-// EncString is a symmetric encrypted value: "<type>.<iv>|<data>|<mac>".
+// EncString is a symmetric encrypted value: "2.<iv>|<data>|<mac>".
 type EncString struct {
 	Type int
 	IV   []byte
@@ -19,85 +19,64 @@ func b64(b []byte) string { return base64.StdEncoding.EncodeToString(b) }
 
 func unb64(s string) ([]byte, error) { return base64.StdEncoding.DecodeString(s) }
 
-// splitEncString mirrors the SDK: "<type>.<parts>" or the legacy headerless form.
+// splitEncString splits "<type>.<part>|<part>...".
 func splitEncString(s string) (int, []string, error) {
 	head, rest, ok := strings.Cut(s, ".")
-	if ok && !strings.Contains(rest, ".") {
-		t, err := strconv.Atoi(head)
-		if err != nil {
-			return 0, nil, ErrInvalidFormat
-		}
-		return t, strings.Split(rest, "|"), nil
+	if !ok {
+		return 0, nil, ErrInvalidFormat
 	}
-	parts := strings.Split(s, "|")
-	if len(parts) == 3 {
-		return 1, parts, nil
+	t, err := strconv.Atoi(head)
+	if err != nil {
+		return 0, nil, ErrInvalidFormat
 	}
-	return 0, parts, nil
+	return t, strings.Split(rest, "|"), nil
 }
 
-// ParseEncString parses a symmetric EncString.
+// ParseEncString parses a symmetric EncString. Only type 2
+// (AES-256-CBC with HMAC-SHA256) is supported.
 func ParseEncString(s string) (*EncString, error) {
 	t, parts, err := splitEncString(s)
 	if err != nil {
 		return nil, err
 	}
-	dec := func(i int) ([]byte, error) { return unb64(parts[i]) }
-	e := &EncString{Type: t}
 	switch {
-	case t == 0 && len(parts) == 2:
-		if e.IV, err = dec(0); err != nil {
-			return nil, ErrInvalidFormat
-		}
-		if e.Data, err = dec(1); err != nil {
-			return nil, ErrInvalidFormat
-		}
-	case t == 2 && len(parts) == 3:
-		if e.IV, err = dec(0); err != nil {
-			return nil, ErrInvalidFormat
-		}
-		if e.Data, err = dec(1); err != nil {
-			return nil, ErrInvalidFormat
-		}
-		if e.MAC, err = dec(2); err != nil {
-			return nil, ErrInvalidFormat
-		}
 	case t == 7:
 		return nil, fmt.Errorf("%w: COSE (type 7) is not supported", ErrUnsupported)
-	default:
+	case t != 2 || len(parts) != 3:
 		return nil, ErrInvalidFormat
 	}
-	if len(e.IV) != 16 || (e.Type == 2 && len(e.MAC) != 32) {
+	e := &EncString{Type: t}
+	if e.IV, err = unb64(parts[0]); err != nil {
+		return nil, ErrInvalidFormat
+	}
+	if e.Data, err = unb64(parts[1]); err != nil {
+		return nil, ErrInvalidFormat
+	}
+	if e.MAC, err = unb64(parts[2]); err != nil {
+		return nil, ErrInvalidFormat
+	}
+	if len(e.IV) != 16 || len(e.MAC) != 32 {
 		return nil, ErrInvalidFormat
 	}
 	return e, nil
 }
 
 func (e *EncString) String() string {
-	switch e.Type {
-	case 0:
-		return "0." + b64(e.IV) + "|" + b64(e.Data)
-	default:
-		return strconv.Itoa(e.Type) + "." + b64(e.IV) + "|" + b64(e.Data) + "|" + b64(e.MAC)
-	}
+	return strconv.Itoa(e.Type) + "." + b64(e.IV) + "|" + b64(e.Data) + "|" + b64(e.MAC)
 }
 
 // Decrypt decrypts with key.
 func (e *EncString) Decrypt(key *SymmetricKey) ([]byte, error) {
-	return aesDecrypt(key, e.Type, e.IV, e.Data, e.MAC)
+	return aesDecrypt(key, e.IV, e.Data, e.MAC)
 }
 
-// Encrypt encrypts plaintext with key (type 2, or type 0 for MAC-less keys).
+// Encrypt encrypts plaintext with key as a type 2 EncString.
 func Encrypt(key *SymmetricKey, plain []byte) (*EncString, error) {
 	iv, ct, mac, err := aesEncrypt(key, plain)
 	if err != nil {
 		return nil, err
 	}
-	t := 2
-	if mac == nil {
-		t = 0
-	}
-	return &EncString{Type: t, IV: iv, Data: ct, MAC: mac}, nil
+	return &EncString{Type: 2, IV: iv, Data: ct, MAC: mac}, nil
 }
 
 // EncryptString encrypts a UTF-8 string and returns the serialized EncString.
@@ -133,22 +112,7 @@ func DecryptKey(key *SymmetricKey, s string) (*SymmetricKey, error) {
 	return NewSymmetricKey(b)
 }
 
-// DecryptUserKey decrypts the protected user key with the master key,
-// stretching it unless the legacy unauthenticated (type 0) format is used.
+// DecryptUserKey decrypts the protected user key with the stretched master key.
 func DecryptUserKey(masterKey []byte, protected string) (*SymmetricKey, error) {
-	e, err := ParseEncString(protected)
-	if err != nil {
-		return nil, err
-	}
-	var k *SymmetricKey
-	if e.Type == 0 {
-		k = &SymmetricKey{Enc: masterKey}
-	} else {
-		k = StretchKey(masterKey)
-	}
-	b, err := e.Decrypt(k)
-	if err != nil {
-		return nil, err
-	}
-	return NewSymmetricKey(b)
+	return DecryptKey(StretchKey(masterKey), protected)
 }

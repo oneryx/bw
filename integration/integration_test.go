@@ -31,7 +31,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yangxiang/bw/internal/testutil"
+	"github.com/oneryx/bw/internal/testutil"
 )
 
 var (
@@ -120,6 +120,7 @@ func TestMain(m *testing.M) {
 	args := []string{"run", "-d", "--rm", "--name", name, "-p", fmt.Sprintf("127.0.0.1:%d:443", port),
 		"-v", tlsDir + ":/ssl:ro,Z", "-e", "ROCKET_PORT=443", "-e", `ROCKET_TLS={certs="/ssl/cert.pem",key="/ssl/key.pem"}`,
 		"-e", "SIGNUPS_ALLOWED=true", "-e", "I_REALLY_WANT_VOLATILE_STORAGE=true",
+		"-e", "LOGIN_RATELIMIT_MAX_BURST=1000", "-e", "LOGIN_RATELIMIT_SECONDS=1",
 		"-e", fmt.Sprintf("DOMAIN=https://localhost:%d", port), image}
 	if out, err := exec.Command(rt, args...).CombinedOutput(); err != nil {
 		fmt.Println(string(out))

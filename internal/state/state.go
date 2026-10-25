@@ -1,5 +1,5 @@
-// Package state persists CLI configuration, tokens and the encrypted vault
-// cache in a single data.json file.
+// Package state holds the persisted configuration, tokens and the encrypted
+// vault cache.
 package state
 
 import (
@@ -14,9 +14,7 @@ import (
 	"github.com/google/uuid"
 )
 
-const fileName = "data.json"
-
-// Environment holds the server URLs set by `bw config server`.
+// Environment holds the configured server URLs.
 type Environment struct {
 	Base          string `json:"base,omitempty"`
 	WebVault      string `json:"webVault,omitempty"`
@@ -70,34 +68,25 @@ type State struct {
 	DeviceID    string      `json:"deviceId"`
 	Account     *Account    `json:"account,omitempty"`
 
-	path string
+	store Store
 }
 
-// Dir returns the data directory, honoring BITWARDENCLI_APPDATA_DIR.
-func Dir() (string, error) {
-	if d := os.Getenv("BITWARDENCLI_APPDATA_DIR"); d != "" {
-		return filepath.Abs(d)
-	}
-	cfg, err := os.UserConfigDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(cfg, "Bitwarden CLI-go"), nil
+// Store persists the serialized state. Load returns (nil, nil) when nothing
+// has been saved yet.
+type Store interface {
+	Load() ([]byte, error)
+	Save(data []byte) error
 }
 
-// Load reads data.json, creating defaults (including a device id) if absent.
-func Load() (*State, error) {
-	dir, err := Dir()
+// Load reads the state from store, creating defaults (including a device id)
+// if it is empty.
+func Load(store Store) (*State, error) {
+	s := &State{store: store}
+	b, err := store.Load()
 	if err != nil {
 		return nil, err
 	}
-	s := &State{path: filepath.Join(dir, fileName)}
-	b, err := os.ReadFile(s.path)
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-	case err != nil:
-		return nil, err
-	default:
+	if len(b) > 0 {
 		if err := json.Unmarshal(b, s); err != nil {
 			return nil, err
 		}
@@ -111,16 +100,33 @@ func Load() (*State, error) {
 	return s, nil
 }
 
-// Save atomically writes data.json with owner-only permissions.
+// Save persists the state.
 func (s *State) Save() error {
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
-		return err
-	}
 	b, err := json.Marshal(s)
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(s.path), fileName+".*")
+	return s.store.Save(b)
+}
+
+// FileStore keeps the state in a JSON file with owner-only permissions.
+type FileStore struct{ Path string }
+
+func (f FileStore) Load() ([]byte, error) {
+	b, err := os.ReadFile(f.Path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	return b, err
+}
+
+// Save writes the file atomically.
+func (f FileStore) Save(b []byte) error {
+	dir := filepath.Dir(f.Path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, filepath.Base(f.Path)+".*")
 	if err != nil {
 		return err
 	}
@@ -136,7 +142,7 @@ func (s *State) Save() error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp.Name(), s.path)
+	return os.Rename(tmp.Name(), f.Path)
 }
 
 const (

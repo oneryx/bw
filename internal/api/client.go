@@ -3,6 +3,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -11,13 +12,12 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/url"
-	"os"
 	"runtime"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/yangxiang/bw/internal/state"
+	"github.com/oneryx/bw/internal/state"
 )
 
 // ClientVersion is reported to the server; Vaultwarden gates some features
@@ -54,6 +54,10 @@ type Client struct {
 	Tokens *state.Tokens
 	// Persist is called after tokens were refreshed.
 	Persist func() error
+	// AllowHTTP permits plain http:// server URLs.
+	AllowHTTP bool
+	// Debug, when set, receives a trace of HTTP traffic (including secrets).
+	Debug io.Writer
 }
 
 // Error is an API error response.
@@ -122,9 +126,9 @@ func parseError(status int, body []byte) *Error {
 // ErrInsecureURL mirrors the official InsecureUrlNotAllowedError.
 var ErrInsecureURL = errors.New("Insecure URL not allowed. All URLs must use HTTPS.")
 
-// checkURL rejects non-HTTPS URLs unless BWCLI_ENV=development, like the official CLI.
-func checkURL(u string) error {
-	if strings.HasPrefix(u, "https://") || os.Getenv("BWCLI_ENV") == "development" {
+// checkURL rejects non-HTTPS URLs unless AllowHTTP is set, like the official CLI.
+func (c *Client) checkURL(u string) error {
+	if strings.HasPrefix(u, "https://") || c.AllowHTTP {
 		return nil
 	}
 	return ErrInsecureURL
@@ -155,9 +159,9 @@ type PreloginResponse struct {
 }
 
 // Prelogin fetches the KDF settings for email.
-func (c *Client) Prelogin(email string) (*PreloginResponse, error) {
+func (c *Client) Prelogin(ctx context.Context, email string) (*PreloginResponse, error) {
 	var out PreloginResponse
-	err := c.send(http.MethodPost, c.Env.IdentityURL()+"/accounts/prelogin", map[string]string{"email": email}, &out, false)
+	err := c.send(ctx, http.MethodPost, c.Env.IdentityURL()+"/accounts/prelogin", map[string]string{"email": email}, &out, false)
 	return &out, err
 }
 
@@ -188,14 +192,14 @@ type TwoFactorRequired struct {
 func (t *TwoFactorRequired) Error() string { return "Two-step login required." }
 
 // Token performs an identity token request with the given form values.
-func (c *Client) Token(form url.Values) (*TokenResponse, error) {
+func (c *Client) Token(ctx context.Context, form url.Values) (*TokenResponse, error) {
 	form.Set("deviceType", strconv.Itoa(DeviceType()))
 	form.Set("deviceIdentifier", c.DeviceID)
 	form.Set("deviceName", deviceName())
-	if err := checkURL(c.Env.IdentityURL()); err != nil {
+	if err := c.checkURL(c.Env.IdentityURL()); err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequest(http.MethodPost, c.Env.IdentityURL()+"/connect/token", strings.NewReader(form.Encode()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.Env.IdentityURL()+"/connect/token", strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, err
 	}
@@ -240,7 +244,7 @@ func SetTokens(t *state.Tokens, tr *TokenResponse) {
 }
 
 // refresh renews the access token using the refresh token or API key.
-func (c *Client) refresh() error {
+func (c *Client) refresh(ctx context.Context) error {
 	form := url.Values{}
 	switch {
 	case c.Tokens.RefreshToken != "":
@@ -255,7 +259,7 @@ func (c *Client) refresh() error {
 	default:
 		return errors.New("Access token expired. Please log in again.")
 	}
-	tr, err := c.Token(form)
+	tr, err := c.Token(ctx, form)
 	if err != nil {
 		return err
 	}
@@ -266,12 +270,12 @@ func (c *Client) refresh() error {
 	return nil
 }
 
-func (c *Client) accessToken() (string, error) {
+func (c *Client) accessToken(ctx context.Context) (string, error) {
 	if c.Tokens == nil || c.Tokens.AccessToken == "" {
 		return "", errors.New("You are not logged in.")
 	}
 	if time.Until(c.Tokens.ExpiresAt) < 5*time.Minute {
-		if err := c.refresh(); err != nil {
+		if err := c.refresh(ctx); err != nil {
 			return "", err
 		}
 	}
@@ -281,8 +285,8 @@ func (c *Client) accessToken() (string, error) {
 // --- generic requests ---
 
 // send performs a JSON request against an absolute URL.
-func (c *Client) send(method, u string, body, out any, auth bool) error {
-	if err := checkURL(u); err != nil {
+func (c *Client) send(ctx context.Context, method, u string, body, out any, auth bool) error {
+	if err := c.checkURL(u); err != nil {
 		return err
 	}
 	var rd io.Reader
@@ -296,10 +300,10 @@ func (c *Client) send(method, u string, body, out any, auth bool) error {
 		if err != nil {
 			return err
 		}
-		debugf("request body: %s\n", buf)
+		c.debugf("request body: %s\n", buf)
 		rd, contentType = bytes.NewReader(buf), "application/json; charset=utf-8"
 	}
-	req, err := http.NewRequest(method, u, rd)
+	req, err := http.NewRequestWithContext(ctx, method, u, rd)
 	if err != nil {
 		return err
 	}
@@ -309,7 +313,7 @@ func (c *Client) send(method, u string, body, out any, auth bool) error {
 		req.Header.Set("Content-Type", contentType)
 	}
 	if auth {
-		tok, err := c.accessToken()
+		tok, err := c.accessToken(ctx)
 		if err != nil {
 			return err
 		}
@@ -324,7 +328,7 @@ func (c *Client) send(method, u string, body, out any, auth bool) error {
 	if err != nil {
 		return err
 	}
-	debugf("%s %s -> %d\n%s\n", method, u, resp.StatusCode, data)
+	c.debugf("%s %s -> %d\n%s\n", method, u, resp.StatusCode, data)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return parseError(resp.StatusCode, data)
 	}
@@ -339,26 +343,28 @@ func (c *Client) send(method, u string, body, out any, auth bool) error {
 }
 
 // Do performs an authenticated JSON request against the API base URL.
-func (c *Client) Do(method, path string, body, out any) error {
-	return c.send(method, c.Env.APIURL()+path, body, out, true)
+func (c *Client) Do(ctx context.Context, method, path string, body, out any) error {
+	return c.send(ctx, method, c.Env.APIURL()+path, body, out, true)
 }
 
 // Get performs an authenticated GET.
-func (c *Client) Get(path string, out any) error { return c.Do(http.MethodGet, path, nil, out) }
+func (c *Client) Get(ctx context.Context, path string, out any) error {
+	return c.Do(ctx, http.MethodGet, path, nil, out)
+}
 
 // Download fetches an absolute URL (attachments / send files); auth is added
 // only for URLs on the API host.
-func (c *Client) Download(u string) ([]byte, error) {
-	if err := checkURL(u); err != nil {
+func (c *Client) Download(ctx context.Context, u string) ([]byte, error) {
+	if err := c.checkURL(u); err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequest(http.MethodGet, u, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err
 	}
 	c.setCommonHeaders(req)
 	if strings.HasPrefix(u, c.Env.APIURL()) {
-		if tok, err := c.accessToken(); err == nil {
+		if tok, err := c.accessToken(ctx); err == nil {
 			req.Header.Set("Authorization", "Bearer "+tok)
 		}
 	}
@@ -405,21 +411,21 @@ func Multipart(fields map[string]string, fileField, fileName string, file []byte
 }
 
 // SendRaw performs an authenticated request to an absolute URL.
-func (c *Client) SendRaw(method, u string, body, out any) error {
-	return c.send(method, u, body, out, true)
+func (c *Client) SendRaw(ctx context.Context, method, u string, body, out any) error {
+	return c.send(ctx, method, u, body, out, true)
 }
 
 // SendAnonymous performs an unauthenticated request against the API base URL.
-func (c *Client) SendAnonymous(method, path string, body, out any) error {
-	return c.send(method, c.Env.APIURL()+path, body, out, false)
+func (c *Client) SendAnonymous(ctx context.Context, method, path string, body, out any) error {
+	return c.send(ctx, method, c.Env.APIURL()+path, body, out, false)
 }
 
 // SendIdentity performs an unauthenticated request against the identity base URL.
 // A non-JSON (plain string) response is stored into *string outputs.
-func (c *Client) SendIdentity(method, path string, body, out any) error {
+func (c *Client) SendIdentity(ctx context.Context, method, path string, body, out any) error {
 	if sp, ok := out.(*string); ok {
 		var raw json.RawMessage
-		if err := c.send(method, c.Env.IdentityURL()+path, body, &raw, false); err != nil {
+		if err := c.send(ctx, method, c.Env.IdentityURL()+path, body, &raw, false); err != nil {
 			return err
 		}
 		if json.Unmarshal(raw, sp) != nil {
@@ -427,12 +433,12 @@ func (c *Client) SendIdentity(method, path string, body, out any) error {
 		}
 		return nil
 	}
-	return c.send(method, c.Env.IdentityURL()+path, body, out, false)
+	return c.send(ctx, method, c.Env.IdentityURL()+path, body, out, false)
 }
 
-// debugf traces HTTP traffic to stderr when BWGO_DEBUG=1 (may print secrets).
-func debugf(format string, args ...any) {
-	if os.Getenv("BWGO_DEBUG") == "1" {
-		fmt.Fprintf(os.Stderr, "[bwgo] "+format, args...)
+// debugf traces HTTP traffic to Debug (may print secrets).
+func (c *Client) debugf(format string, args ...any) {
+	if c.Debug != nil {
+		fmt.Fprintf(c.Debug, "[bwgo] "+format, args...)
 	}
 }

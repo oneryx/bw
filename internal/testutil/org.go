@@ -1,16 +1,17 @@
 package testutil
 
 import (
+	"context"
 	"encoding/base64"
 	"errors"
 	"net/http"
 	"net/url"
 	"strings"
 
-	"github.com/yangxiang/bw/internal/api"
-	"github.com/yangxiang/bw/internal/crypto"
-	"github.com/yangxiang/bw/internal/state"
-	"github.com/yangxiang/bw/internal/totp"
+	"github.com/oneryx/bw/internal/api"
+	"github.com/oneryx/bw/internal/crypto"
+	"github.com/oneryx/bw/internal/state"
+	"github.com/oneryx/bw/totp"
 )
 
 // Session is a logged-in test user.
@@ -26,7 +27,7 @@ type Session struct {
 // Login performs a password login and fetches the profile.
 func Login(serverURL, email, password string) (*Session, error) {
 	c := &api.Client{Env: state.Environment{Base: serverURL}, DeviceID: "11111111-2222-3333-4444-555555555555", Tokens: &state.Tokens{}}
-	pre, err := c.Prelogin(email)
+	pre, err := c.Prelogin(context.Background(), email)
 	if err != nil {
 		return nil, err
 	}
@@ -43,7 +44,7 @@ func Login(serverURL, email, password string) (*Session, error) {
 	}
 	form := url.Values{"grant_type": {"password"}, "scope": {"api offline_access"}, "client_id": {"cli"},
 		"username": {strings.ToLower(email)}, "password": {crypto.MasterPasswordHash(mk, password)}}
-	tr, err := c.Token(form)
+	tr, err := c.Token(context.Background(), form)
 	if err != nil {
 		return nil, err
 	}
@@ -53,7 +54,7 @@ func Login(serverURL, email, password string) (*Session, error) {
 		return nil, err
 	}
 	s := &Session{Client: c, UserKey: uk}
-	return s, c.Get("/accounts/profile", &s.Profile)
+	return s, c.Get(context.Background(), "/accounts/profile", &s.Profile)
 }
 
 // CreateOrg creates an organization owned by the session user and returns its id.
@@ -95,7 +96,7 @@ func (s *Session) CreateOrg(name, collectionName string) (string, error) {
 	var res struct {
 		ID string `json:"id"`
 	}
-	if err := s.Client.Do(http.MethodPost, "/organizations", body, &res); err != nil {
+	if err := s.Client.Do(context.Background(), http.MethodPost, "/organizations", body, &res); err != nil {
 		return "", err
 	}
 	if res.ID == "" {
@@ -107,7 +108,7 @@ func (s *Session) CreateOrg(name, collectionName string) (string, error) {
 // Invite invites an email as a regular user and returns the member id.
 func (s *Session) Invite(orgID, email string) (string, error) {
 	body := map[string]any{"emails": []string{email}, "type": 2, "collections": []any{}, "accessAll": false, "groups": []any{}, "permissions": map[string]any{}}
-	if err := s.Client.Do(http.MethodPost, "/organizations/"+orgID+"/users/invite", body, nil); err != nil {
+	if err := s.Client.Do(context.Background(), http.MethodPost, "/organizations/"+orgID+"/users/invite", body, nil); err != nil {
 		return "", err
 	}
 	var users struct {
@@ -116,7 +117,7 @@ func (s *Session) Invite(orgID, email string) (string, error) {
 			Email string `json:"email"`
 		} `json:"data"`
 	}
-	if err := s.Client.Get("/organizations/"+orgID+"/users", &users); err != nil {
+	if err := s.Client.Get(context.Background(), "/organizations/"+orgID+"/users", &users); err != nil {
 		return "", err
 	}
 	for _, u := range users.Data {
@@ -129,7 +130,7 @@ func (s *Session) Invite(orgID, email string) (string, error) {
 
 // EnableTOTP turns on authenticator 2FA and returns the base32 secret.
 func (s *Session) EnableTOTP(email, password string) (string, error) {
-	pre, err := s.Client.Prelogin(email)
+	pre, err := s.Client.Prelogin(context.Background(), email)
 	if err != nil {
 		return "", err
 	}
@@ -142,7 +143,7 @@ func (s *Session) EnableTOTP(email, password string) (string, error) {
 	var res struct {
 		Key string `json:"key"`
 	}
-	if err := s.Client.Do(http.MethodPost, "/two-factor/get-authenticator", map[string]string{"masterPasswordHash": hash}, &res); err != nil {
+	if err := s.Client.Do(context.Background(), http.MethodPost, "/two-factor/get-authenticator", map[string]string{"masterPasswordHash": hash}, &res); err != nil {
 		return "", err
 	}
 	code, err := totp.Generate(res.Key)
@@ -150,5 +151,5 @@ func (s *Session) EnableTOTP(email, password string) (string, error) {
 		return "", err
 	}
 	body := map[string]string{"key": res.Key, "token": code, "masterPasswordHash": hash}
-	return res.Key, s.Client.Do(http.MethodPost, "/two-factor/authenticator", body, nil)
+	return res.Key, s.Client.Do(context.Background(), http.MethodPost, "/two-factor/authenticator", body, nil)
 }

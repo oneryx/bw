@@ -6,8 +6,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/yangxiang/bw/internal/crypto"
-	"github.com/yangxiang/bw/internal/vault"
+	"github.com/oneryx/bw/internal/crypto"
+	"github.com/oneryx/bw/vault"
 )
 
 // --- bitwardencsv ---

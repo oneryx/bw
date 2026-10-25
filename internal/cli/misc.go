@@ -1,11 +1,9 @@
 package cli
 
 import (
-	"bytes"
 	"encoding/base64"
 	"io"
 	"os"
-	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -13,9 +11,9 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
-	"github.com/yangxiang/bw/internal/generator"
-	"github.com/yangxiang/bw/internal/output"
-	"github.com/yangxiang/bw/internal/state"
+	"github.com/oneryx/bw"
+	"github.com/oneryx/bw/generator"
+	"github.com/oneryx/bw/internal/output"
 )
 
 // jsTime formats a time like JavaScript's Date.toJSON().
@@ -32,21 +30,6 @@ func parseIntOption(s string, def int) int {
 		return v
 	}
 	return def
-}
-
-func (a *App) sdkVersionCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "sdk-version",
-		Short: "Print the SDK version.",
-		Args:  cobra.NoArgs,
-		Run: func(cmd *cobra.Command, args []string) {
-			v := "native-go"
-			if bi, ok := debug.ReadBuildInfo(); ok {
-				v = "native-go (" + bi.GoVersion + ")"
-			}
-			a.print(output.String(v))
-		},
-	}
 }
 
 func (a *App) generateCmd() *cobra.Command {
@@ -155,7 +138,7 @@ func (a *App) configCmd() *cobra.Command {
 			if strings.ToLower(args[0]) != "server" {
 				return output.Error("Unknown setting.")
 			}
-			st, err := a.state()
+			c, err := a.client()
 			if err != nil {
 				return output.Error("%v", err)
 			}
@@ -163,7 +146,7 @@ func (a *App) configCmd() *cobra.Command {
 			if len(args) > 1 {
 				url = strings.TrimSpace(args[1])
 			}
-			env := state.Environment{
+			cfg := bw.ServerConfig{
 				WebVault:      str(cmd, "web-vault"),
 				API:           str(cmd, "api"),
 				Identity:      str(cmd, "identity"),
@@ -172,21 +155,17 @@ func (a *App) configCmd() *cobra.Command {
 				Events:        str(cmd, "events"),
 				KeyConnector:  str(cmd, "key-connector"),
 			}
-			if url == "" && env.WebVault == "" && env.API == "" && env.Identity == "" &&
-				env.Icons == "" && env.Notifications == "" && env.Events == "" {
-				if st.Environment.Base != "" {
-					return output.String(st.Environment.Base)
+			if url == "" && cfg.WebVault == "" && cfg.API == "" && cfg.Identity == "" &&
+				cfg.Icons == "" && cfg.Notifications == "" && cfg.Events == "" {
+				if base := c.ServerConfig().Base; base != "" {
+					return output.String(base)
 				}
 				return output.String("https://bitwarden.com")
 			}
-			if st.Account != nil {
-				return output.Error("Logout required before server config update.")
-			}
 			if url != "null" && url != "bitwarden.com" && url != "https://bitwarden.com" {
-				env.Base = url
+				cfg.Base = url
 			}
-			st.Environment = env
-			if err := st.Save(); err != nil {
+			if err := c.SetServerConfig(cfg); err != nil {
 				return output.Error("%v", err)
 			}
 			return output.Message("Saved setting `config`.", "", "")
@@ -200,55 +179,6 @@ func (a *App) configCmd() *cobra.Command {
 	f.String("notifications", "", "Provides a custom notifications URL that differs from the base URL.")
 	f.String("events", "", "Provides a custom events URL that differs from the base URL.")
 	f.String("key-connector", "", "Provides the URL for your Key Connector server.")
-	return cmd
-}
-
-func (a *App) updateCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "update",
-		Short: "Check for updates.",
-		Args:  cobra.NoArgs,
-		Run: a.action(func(cmd *cobra.Command, args []string) output.Response {
-			return output.Message("No update available.",
-				"You are already using the latest version ("+Version+"). Self-update is not supported; rebuild from source to upgrade.", "")
-		}),
-	}
-}
-
-func (a *App) completionCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:     "completion",
-		Short:   "Generate shell completions.",
-		Long:    "Generate shell completions.\n\nNotes:\n  Valid shells are `zsh`, `bash`, `fish` and `powershell`.",
-		Example: "  bw completion --shell zsh",
-		Args:    cobra.NoArgs,
-		Run: a.action(func(cmd *cobra.Command, args []string) output.Response {
-			shell := str(cmd, "shell")
-			if shell == "" {
-				return output.Error("`shell` option was not provided.")
-			}
-			var buf bytes.Buffer
-			root := cmd.Root()
-			var err error
-			switch shell {
-			case "zsh":
-				err = root.GenZshCompletion(&buf)
-			case "bash":
-				err = root.GenBashCompletionV2(&buf, true)
-			case "fish":
-				err = root.GenFishCompletion(&buf, true)
-			case "powershell":
-				err = root.GenPowerShellCompletionWithDesc(&buf)
-			default:
-				return output.Error("Unsupported shell.")
-			}
-			if err != nil {
-				return output.Error("%v", err)
-			}
-			return output.Message(buf.String(), "", "")
-		}),
-	}
-	cmd.Flags().String("shell", "", "Shell to generate completions for.")
 	return cmd
 }
 
@@ -278,21 +208,16 @@ func (a *App) statusCmd() *cobra.Command {
     }`,
 		Args: cobra.NoArgs,
 		Run: a.action(func(cmd *cobra.Command, args []string) output.Response {
-			st, err := a.state()
+			c, err := a.client()
 			if err != nil {
 				return output.Error("%v", err)
 			}
-			t := statusTemplate{ServerURL: st.Environment.Base, Status: "unauthenticated"}
-			if acc := st.Account; acc != nil {
-				t.UserEmail, t.UserID = acc.Email, acc.UserID
-				if acc.LastSync != nil {
-					s := jsTime(*acc.LastSync)
-					t.LastSync = &s
-				}
-				t.Status = "locked"
-				if a.isUnlocked() {
-					t.Status = "unlocked"
-				}
+			a.isUnlocked() // applies the session key
+			s := c.Status()
+			t := statusTemplate{ServerURL: s.ServerURL, UserEmail: s.UserEmail, UserID: s.UserID, Status: s.Status}
+			if s.LastSync != nil {
+				last := jsTime(*s.LastSync)
+				t.LastSync = &last
 			}
 			return output.Template(t)
 		}),

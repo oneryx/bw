@@ -2,19 +2,16 @@ package cli
 
 import (
 	"bufio"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"golang.org/x/term"
 
-	"github.com/yangxiang/bw/internal/api"
-	"github.com/yangxiang/bw/internal/crypto"
-	"github.com/yangxiang/bw/internal/output"
-	"github.com/yangxiang/bw/internal/state"
-	"github.com/yangxiang/bw/internal/vault"
+	"github.com/oneryx/bw"
+	"github.com/oneryx/bw/internal/output"
 )
 
 var stdinReader = bufio.NewReader(os.Stdin)
@@ -54,13 +51,12 @@ func readFirstLine(path string) (string, error) {
 }
 
 // getPassword mirrors CliUtils.getPassword.
-func (a *App) getPassword(password, passwordFile, passwordEnv, promptMsg string) (string, *output.Response) {
+func (a *App) getPassword(password, passwordFile, passwordEnv, promptMsg string) (string, error) {
 	if password == "" {
 		if passwordFile != "" {
 			p, err := readFirstLine(passwordFile)
 			if err != nil {
-				r := output.Error("%v", err)
-				return "", &r
+				return "", err
 			}
 			password = p
 		} else if passwordEnv != "" {
@@ -73,140 +69,102 @@ func (a *App) getPassword(password, passwordFile, passwordEnv, promptMsg string)
 	}
 	if password == "" {
 		if a.noInteraction {
-			r := output.Error("Master password is required. Try again in interactive mode or provide a password file or environment variable.")
-			return "", &r
+			return "", errors.New("Master password is required. Try again in interactive mode or provide a password file or environment variable.")
 		}
 		password = promptSecret(promptMsg)
 	}
 	return password, nil
 }
 
-// client returns an API client bound to the persisted state.
-func (a *App) client() (*api.Client, error) {
-	st, err := a.state()
+// dataDir returns the data directory, honoring BITWARDENCLI_APPDATA_DIR.
+func dataDir() (string, error) {
+	if d := os.Getenv("BITWARDENCLI_APPDATA_DIR"); d != "" {
+		return filepath.Abs(d)
+	}
+	cfg, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(cfg, "Bitwarden CLI-go"), nil
+}
+
+// client lazily opens the library client on data.json.
+func (a *App) client() (*bw.Client, error) {
+	if a.bw != nil {
+		return a.bw, nil
+	}
+	dir, err := dataDir()
 	if err != nil {
 		return nil, err
 	}
-	c := &api.Client{Env: st.Environment, DeviceID: st.DeviceID, Persist: st.Save}
-	if st.Account != nil {
-		c.Tokens = &st.Account.Tokens
+	opts := bw.Options{
+		Store:             bw.FileStore(filepath.Join(dir, "data.json")),
+		AllowInsecureHTTP: os.Getenv("BWCLI_ENV") == "development",
+	}
+	if os.Getenv("BWGO_DEBUG") == "1" {
+		opts.DebugLog = os.Stderr
+	}
+	c, err := bw.New(opts)
+	if err != nil {
+		return nil, err
+	}
+	a.bw = c
+	return c, nil
+}
+
+// requireAuthed mirrors exitIfNotAuthed.
+func (a *App) requireAuthed() (*bw.Client, error) {
+	c, err := a.client()
+	if err != nil {
+		return nil, err
+	}
+	if !c.LoggedIn() {
+		return nil, bw.ErrNotLoggedIn
 	}
 	return c, nil
 }
 
-func kdfParams(k state.KDF) crypto.KDFParams {
-	p := crypto.KDFParams{Type: k.Type, Iterations: k.Iterations}
-	if k.Memory != nil {
-		p.Memory = *k.Memory
-	}
-	if k.Parallelism != nil {
-		p.Parallelism = *k.Parallelism
-	}
-	return p
-}
-
-// newSession protects the user key under a fresh session key and returns
-// the base64 session key (the BW_SESSION value).
-func newSession(acc *state.Account, userKey *crypto.SymmetricKey) (string, error) {
-	sk := crypto.GenerateSymmetricKey()
-	enc, err := crypto.Encrypt(sk, userKey.Bytes())
-	if err != nil {
-		return "", err
-	}
-	acc.SessionUserKey = enc.String()
-	return base64.StdEncoding.EncodeToString(sk.Bytes()), nil
-}
-
-// sessionUserKey decrypts the user key with the current session key.
-func (a *App) sessionUserKey() (*crypto.SymmetricKey, error) {
-	st, err := a.state()
-	if err != nil {
-		return nil, err
-	}
-	if st.Account == nil || st.Account.SessionUserKey == "" || a.session == "" {
-		return nil, errors.New("locked")
-	}
-	raw, err := base64.StdEncoding.DecodeString(a.session)
-	if err != nil {
-		return nil, err
-	}
-	sk, err := crypto.NewSymmetricKey(raw)
-	if err != nil {
-		return nil, err
-	}
-	return crypto.DecryptKey(sk, st.Account.SessionUserKey)
-}
-
-// isUnlocked reports whether the current session key unlocks the vault.
+// isUnlocked reports whether the session key unlocks the vault.
 func (a *App) isUnlocked() bool {
-	_, err := a.sessionUserKey()
-	return err == nil
-}
-
-// unlockWithPassword derives the user key from the master password.
-func unlockWithPassword(acc *state.Account, password string) (*crypto.SymmetricKey, error) {
-	mk, err := crypto.MasterKey(password, acc.Email, kdfParams(acc.KDF))
-	if err != nil {
-		return nil, err
-	}
-	uk, err := crypto.DecryptUserKey(mk, acc.EncUserKey)
-	if err != nil {
-		return nil, errors.New("Invalid master password.")
-	}
-	return uk, nil
-}
-
-// requireAuthed mirrors exitIfNotAuthed.
-func (a *App) requireAuthed() (*state.State, *output.Response) {
-	st, err := a.state()
-	if err != nil {
-		r := output.Error("%v", err)
-		return nil, &r
-	}
-	if st.Account == nil || st.Account.Tokens.AccessToken == "" {
-		r := output.Error("You are not logged in.")
-		return nil, &r
-	}
-	return st, nil
+	c, err := a.requireAuthed()
+	return err == nil && (c.Unlocked() || c.UnlockWithSession(a.session) == nil)
 }
 
 // requireUnlocked mirrors exitIfLocked: with interaction allowed, a locked
 // vault prompts for the master password and is unlocked for this command only.
-func (a *App) requireUnlocked() (*crypto.SymmetricKey, *output.Response) {
-	st, resp := a.requireAuthed()
-	if resp != nil {
-		return nil, resp
+func (a *App) requireUnlocked() (*bw.Client, error) {
+	c, err := a.requireAuthed()
+	if err != nil {
+		return nil, err
 	}
-	if uk, err := a.sessionUserKey(); err == nil {
-		return uk, nil
+	if a.isUnlocked() {
+		return c, nil
 	}
 	if a.noInteraction {
-		r := output.Error("Vault is locked.")
-		return nil, &r
+		return nil, bw.ErrLocked
 	}
-	password, resp := a.getPassword("", "", "", "Master password:")
-	if resp != nil {
-		return nil, resp
-	}
-	uk, err := unlockWithPassword(st.Account, password)
+	password, err := a.getPassword("", "", "", "Master password:")
 	if err != nil {
-		r := output.Error("%v", err)
-		return nil, &r
+		return nil, err
 	}
-	return uk, nil
+	if err := c.Unlock(password); err != nil {
+		return nil, err
+	}
+	return c, nil
 }
 
-// openVault ensures the vault is unlocked and returns decrypted access to it.
-func (a *App) openVault() (*vault.Vault, *output.Response) {
-	uk, resp := a.requireUnlocked()
-	if resp != nil {
-		return nil, resp
+// errResp converts a library error into a failed response.
+func errResp(err error) output.Response {
+	if r, ok := err.(*output.Response); ok {
+		return *r
 	}
-	st, _ := a.state()
-	v, err := vault.Open(st.Account.Vault, uk, st.Account.EncPrivateKey)
-	if err != nil {
-		r := output.Error("%v", err)
-		return nil, &r
+	r := output.Error("%v", err)
+	var mr *bw.MultipleResultsError
+	if errors.As(err, &mr) {
+		r.Data = mr.IDs
 	}
-	return v, nil
+	return r
 }
+
+// jsError formats errors thrown as JS Error objects ("Error: msg").
+func jsError(msg string) output.Response { return output.Error("Error: %s", msg) }

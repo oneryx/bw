@@ -1,22 +1,17 @@
 package cli
 
 import (
-	"encoding/base64"
-	"encoding/json"
-	"net/http"
-	"net/url"
+	"context"
+	"errors"
 	"os"
 	"slices"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 
-	"github.com/yangxiang/bw/internal/api"
-	"github.com/yangxiang/bw/internal/crypto"
-	"github.com/yangxiang/bw/internal/output"
-	"github.com/yangxiang/bw/internal/state"
+	"github.com/oneryx/bw"
+	"github.com/oneryx/bw/internal/output"
 )
 
 func (a *App) loginCmd() *cobra.Command {
@@ -26,16 +21,13 @@ func (a *App) loginCmd() *cobra.Command {
 		Long:  "Log into a user account.\n\nNotes:\n  See docs for valid `method` enum values.\n\n  Pass `--raw` option to only return the session key.",
 		Example: `  bw login
   bw login john@example.com myPassword321 --raw
-  bw login john@example.com myPassword321 --method 1 --code 249213
-  bw login --sso`,
+  bw login john@example.com myPassword321 --method 1 --code 249213`,
 		Args: cobra.MaximumNArgs(2),
 		Run:  a.action(a.runLogin),
 	}
 	f := cmd.Flags()
 	f.String("method", "", "Two-step login method.")
 	f.String("code", "", "Two-step login code.")
-	f.String("sso", "", "Log in with Single-Sign On with optional organization identifier.")
-	f.Lookup("sso").NoOptDefVal = " "
 	f.Bool("apikey", false, "Log in with an Api Key.")
 	f.String("passwordenv", "", "Environment variable storing your password")
 	f.String("passwordfile", "", "Path to a file containing your password as its first line")
@@ -43,223 +35,91 @@ func (a *App) loginCmd() *cobra.Command {
 	return cmd
 }
 
-// Two-step login providers supported by this CLI, in the official order.
-var twoFactorProviders = []struct {
-	Type int
-	Name string
-}{
-	{0, "Authenticator App"},
-	{3, "YubiKey OTP Security Key"},
-	{1, "Email"},
-}
-
-// jwtClaims extracts the user id and email from an access token.
-func jwtClaims(token string) (sub, email string) {
-	parts := strings.Split(token, ".")
-	if len(parts) < 2 {
-		return "", ""
-	}
-	b, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(parts[1], "="))
-	if err != nil {
-		return "", ""
-	}
-	var c struct {
-		Sub   string `json:"sub"`
-		Email string `json:"email"`
-	}
-	_ = json.Unmarshal(b, &c)
-	return c.Sub, c.Email
-}
-
 func (a *App) runLogin(cmd *cobra.Command, args []string) output.Response {
-	st, err := a.state()
+	c, err := a.client()
 	if err != nil {
 		return output.Error("%v", err)
 	}
 	if boolean(cmd, "check") {
-		if st.Account != nil && st.Account.Tokens.AccessToken != "" {
+		if c.LoggedIn() {
 			return output.Message("You are logged in!", "", "")
 		}
 		return output.Error("You are not logged in.")
 	}
-	if st.Account != nil {
-		return output.Error("You are already logged in as %s.", st.Account.Email)
+	if email := c.Email(); email != "" {
+		return output.Error("You are already logged in as %s.", email)
 	}
-	sso := changed(cmd, "sso") && !a.noInteraction
 
-	var email, password string
+	var opts bw.LoginOptions
 	if len(args) > 0 {
-		email = args[0]
+		opts.Email = args[0]
 	}
 	if len(args) > 1 {
-		password = args[1]
+		opts.Password = args[1]
 	}
 	apiKey := boolean(cmd, "apikey")
-	var clientID, clientSecret string
-	var ssoCode, ssoVerifier, ssoRedirect string
 	if apiKey {
-		clientID, clientSecret = os.Getenv("BW_CLIENTID"), os.Getenv("BW_CLIENTSECRET")
+		opts.Email, opts.Password = "", ""
+		opts.ClientID, opts.ClientSecret = os.Getenv("BW_CLIENTID"), os.Getenv("BW_CLIENTSECRET")
 		if _, ok := os.LookupEnv("BW_CLIENTID"); !ok && !a.noInteraction {
-			clientID = prompt("client_id:")
+			opts.ClientID = prompt("client_id:")
 		}
 		if _, ok := os.LookupEnv("BW_CLIENTSECRET"); !ok && !a.noInteraction {
-			clientSecret = prompt("client_secret:")
+			opts.ClientSecret = prompt("client_secret:")
 		}
-		if strings.TrimSpace(clientID) == "" {
+		if strings.TrimSpace(opts.ClientID) == "" {
 			return output.Error("client_id is required.")
 		}
-		if clientSecret == "" {
-			return output.Error("client_secret is required.")
-		}
-		if !strings.HasPrefix(clientID, "user") {
-			return output.Error("Invalid API Key; Organization API Key currently not supported")
-		}
-	} else if sso {
-		ssoCode, ssoVerifier, ssoRedirect, err = ssoAuthorize(st.Environment.WebVaultURL(), strings.TrimSpace(str(cmd, "sso")))
-		if err != nil {
-			return output.Error("%v", err)
-		}
 	} else {
-		if email == "" && !a.noInteraction {
-			email = prompt("Email address:")
+		if opts.Email == "" && !a.noInteraction {
+			opts.Email = prompt("Email address:")
 		}
-		if strings.TrimSpace(email) == "" {
+		if strings.TrimSpace(opts.Email) == "" {
 			return output.Error("Email address is required.")
 		}
-		if !strings.Contains(email, "@") {
+		if !strings.Contains(opts.Email, "@") {
 			return output.Error("Email address is invalid.")
 		}
-		if password == "" {
+		if opts.Password == "" {
 			if f := str(cmd, "passwordfile"); f != "" {
-				if password, err = readFirstLine(f); err != nil {
+				if opts.Password, err = readFirstLine(f); err != nil {
 					return output.Error("%v", err)
 				}
 			} else if e := str(cmd, "passwordenv"); e != "" && os.Getenv(e) != "" {
-				password = os.Getenv(e)
+				opts.Password = os.Getenv(e)
 			} else if !a.noInteraction {
-				password = promptSecret("Master password:")
+				opts.Password = promptSecret("Master password:")
 			}
-		}
-		if password == "" {
-			return output.Error("Master password is required.")
 		}
 	}
 
-	twoFactorCode := str(cmd, "code")
-	twoFactorMethod := -1
+	code, method := str(cmd, "code"), -1
 	if m := str(cmd, "method"); m != "" {
 		v, err := strconv.Atoi(m)
 		if err != nil || v < 0 || v > 8 {
 			return output.Error("Invalid two-step login method.")
 		}
-		twoFactorMethod = v
+		method = v
+	}
+	if code != "" && method >= 0 {
+		opts.TwoFactor = &bw.TwoFactor{Provider: bw.TwoFactorProvider(method), Code: code}
 	}
 
-	c, err := a.client()
-	if err != nil {
-		return output.Error("%v", err)
-	}
-
-	form := url.Values{}
-	var masterKey []byte
-	var pwHash string
-	var kdf state.KDF
-	if apiKey {
-		form.Set("grant_type", "client_credentials")
-		form.Set("scope", "api")
-		form.Set("client_id", clientID)
-		form.Set("client_secret", clientSecret)
-	} else if sso {
-		form.Set("grant_type", "authorization_code")
-		form.Set("scope", "api offline_access")
-		form.Set("client_id", "cli")
-		form.Set("code", ssoCode)
-		form.Set("code_verifier", ssoVerifier)
-		form.Set("redirect_uri", ssoRedirect)
-	} else {
-		pre, err := c.Prelogin(email)
-		if err != nil {
-			return output.Error("%v", err)
-		}
-		kdf = state.KDF{Type: pre.Kdf, Iterations: pre.KdfIterations, Memory: pre.KdfMemory, Parallelism: pre.KdfParallelism}
-		if masterKey, err = crypto.MasterKey(password, email, kdfParams(kdf)); err != nil {
-			return output.Error("%v", err)
-		}
-		pwHash = crypto.MasterPasswordHash(masterKey, password)
-		form.Set("grant_type", "password")
-		form.Set("scope", "api offline_access")
-		form.Set("client_id", "cli")
-		form.Set("username", email)
-		form.Set("password", pwHash)
-	}
-	if twoFactorCode != "" && twoFactorMethod >= 0 {
-		form.Set("twoFactorToken", twoFactorCode)
-		form.Set("twoFactorProvider", strconv.Itoa(twoFactorMethod))
-		form.Set("twoFactorRemember", "0")
-	}
-
-	tr, err := c.Token(form)
-	if tf, ok := err.(*api.TwoFactorRequired); ok {
-		tr, err = a.twoFactorLogin(c, form, tf, twoFactorMethod, twoFactorCode, email, pwHash)
+	ctx := context.Background()
+	err = c.Login(ctx, opts)
+	var tf *bw.TwoFactorRequiredError
+	if errors.As(err, &tf) {
+		err = a.twoFactorLogin(ctx, tf, method, code, apiKey)
 	}
 	if err != nil {
-		if r, ok := err.(*output.Response); ok {
-			return *r
-		}
-		if ae, ok := err.(*api.Error); ok {
-			if apiKey && ae.ErrorCode == "invalid_client" {
-				return output.Error("client_id or client_secret is incorrect. Try again.")
-			}
-			if strings.HasPrefix(ae.Message, "Username or password is incorrect") {
-				u, _ := url.Parse(st.Environment.WebVaultURL())
-				return output.Error("Invalid master password. Confirm your email is correct and your account was created on %s.", u.Host)
-			}
-		}
-		return output.Error("%v", err)
+		return errResp(err)
 	}
-
-	if sso && (tr.UserDecryptionOptions == nil || !tr.UserDecryptionOptions.HasMasterPassword) {
-		return output.Error("In order to log in with SSO from the CLI, you must first log in" +
-			" through the web vault, the desktop, or the extension to set your master password.")
-	}
-	userID, jwtEmail := jwtClaims(tr.AccessToken)
-	if apiKey || sso {
-		email = jwtEmail
-		kdf = state.KDF{Type: tr.Kdf, Iterations: tr.KdfIterations, Memory: tr.KdfMemory, Parallelism: tr.KdfParallelism}
-	}
-	acc := &state.Account{
-		UserID:        userID,
-		Email:         strings.ToLower(strings.TrimSpace(email)),
-		KDF:           kdf,
-		EncUserKey:    tr.Key,
-		EncPrivateKey: tr.PrivateKey,
-	}
-	api.SetTokens(&acc.Tokens, tr)
 	if apiKey {
-		acc.Tokens.ClientID, acc.Tokens.ClientSecret = clientID, clientSecret
-	}
-	st.Account = acc
-	c.Tokens = &acc.Tokens
-
-	var session string
-	if !apiKey && !sso {
-		uk, err := crypto.DecryptUserKey(masterKey, tr.Key)
-		if err != nil {
-			st.Account = nil
-			return output.Error("Legacy encryption is no longer supported. Please contact support to recover your account.")
-		}
-		if session, err = newSession(acc, uk); err != nil {
-			return output.Error("%v", err)
-		}
-	}
-	if err := st.Save(); err != nil {
-		return output.Error("%v", err)
-	}
-	if err := a.fullSync(c, st, true); err != nil {
-		return output.Error("Syncing failed: %v", err)
-	}
-	if apiKey || sso {
 		return output.Message("You are logged in!", "\nTo unlock your vault, use the `unlock` command. ex:\n$ bw unlock", "")
+	}
+	session, err := c.NewSession()
+	if err != nil {
+		return output.Error("%v", err)
 	}
 	return sessionMessage("You are logged in!", session)
 }
@@ -273,49 +133,37 @@ func sessionMessage(title, session string) output.Response {
 		"$ bw list items --session "+session, session)
 }
 
-// twoFactorLogin selects a provider, collects the code and retries the token request.
-func (a *App) twoFactorLogin(c *api.Client, form url.Values, tf *api.TwoFactorRequired, method int, code, email, pwHash string) (*api.TokenResponse, error) {
-	var available []int
-	var names []string
-	for _, p := range twoFactorProviders {
-		if _, ok := tf.Providers[strconv.Itoa(p.Type)]; ok {
-			available = append(available, p.Type)
-			names = append(names, p.Name)
-		}
-	}
-	fail := func(msg string) (*api.TokenResponse, error) {
-		r := output.Error("%s", msg)
-		return nil, &r
-	}
+// twoFactorLogin selects a provider, collects the code and completes the login.
+func (a *App) twoFactorLogin(ctx context.Context, tf *bw.TwoFactorRequiredError, method int, code string, apiKey bool) error {
+	available := tf.Providers
 	if len(available) == 0 {
-		return fail("No providers available for this client.")
+		return errors.New("No providers available for this client.")
 	}
-	selected := -1
-	if method >= 0 && slices.Contains(available, method) {
-		selected = method
+	selected := bw.TwoFactorProvider(-1)
+	if method >= 0 && slices.Contains(available, bw.TwoFactorProvider(method)) {
+		selected = bw.TwoFactorProvider(method)
 	}
 	if selected < 0 {
 		switch {
 		case len(available) == 1:
 			selected = available[0]
 		case !a.noInteraction:
-			for i, n := range names {
-				os.Stderr.WriteString("  " + strconv.Itoa(i+1) + ") " + n + "\n")
+			for i, p := range available {
+				os.Stderr.WriteString("  " + strconv.Itoa(i+1) + ") " + p.String() + "\n")
 			}
-			os.Stderr.WriteString("  " + strconv.Itoa(len(names)+1) + ") Cancel\n")
+			os.Stderr.WriteString("  " + strconv.Itoa(len(available)+1) + ") Cancel\n")
 			i, err := strconv.Atoi(strings.TrimSpace(prompt("Two-step login method:")))
-			if err != nil || i < 1 || i > len(names) {
-				return fail("Login failed.")
+			if err != nil || i < 1 || i > len(available) {
+				return bw.ErrTwoFactorFailed
 			}
 			selected = available[i-1]
 		default:
-			return fail("Login failed. No provider selected.")
+			return errors.New("Login failed. No provider selected.")
 		}
 	}
-	if code == "" && selected == 1 && email != "" {
-		body := map[string]string{"email": email, "masterPasswordHash": pwHash, "deviceIdentifier": c.DeviceID}
-		if err := c.SendAnonymous(http.MethodPost, "/two-factor/send-email-login", body, nil); err != nil {
-			return nil, err
+	if code == "" && selected == bw.TwoFactorEmail && !apiKey {
+		if err := tf.SendEmail(ctx); err != nil {
+			return err
 		}
 	}
 	if code == "" {
@@ -323,17 +171,10 @@ func (a *App) twoFactorLogin(c *api.Client, form url.Values, tf *api.TwoFactorRe
 			code = prompt("Two-step login code:")
 		}
 		if code == "" {
-			return fail("Code is required.")
+			return errors.New("Code is required.")
 		}
 	}
-	form.Set("twoFactorToken", code)
-	form.Set("twoFactorProvider", strconv.Itoa(selected))
-	form.Set("twoFactorRemember", "0")
-	tr, err := c.Token(form)
-	if _, ok := err.(*api.TwoFactorRequired); ok {
-		return fail("Login failed.")
-	}
-	return tr, err
+	return tf.Submit(ctx, selected, code)
 }
 
 func (a *App) logoutCmd() *cobra.Command {
@@ -343,12 +184,11 @@ func (a *App) logoutCmd() *cobra.Command {
 		Example: "  bw logout",
 		Args:    cobra.NoArgs,
 		Run: a.action(func(cmd *cobra.Command, args []string) output.Response {
-			st, resp := a.requireAuthed()
-			if resp != nil {
-				return *resp
+			c, err := a.requireAuthed()
+			if err != nil {
+				return errResp(err)
 			}
-			st.Account = nil
-			if err := st.Save(); err != nil {
+			if err := c.Logout(); err != nil {
 				return output.Error("%v", err)
 			}
 			return output.Message("You have logged out.", "", "")
@@ -363,12 +203,11 @@ func (a *App) lockCmd() *cobra.Command {
 		Example: "  bw lock",
 		Args:    cobra.NoArgs,
 		Run: a.action(func(cmd *cobra.Command, args []string) output.Response {
-			st, resp := a.requireAuthed()
-			if resp != nil {
-				return *resp
+			c, err := a.requireAuthed()
+			if err != nil {
+				return errResp(err)
 			}
-			st.Account.SessionUserKey = ""
-			if err := st.Save(); err != nil {
+			if err := c.Lock(); err != nil {
 				return output.Error("%v", err)
 			}
 			return output.Message("Your vault is locked.", "", "")
@@ -386,9 +225,9 @@ func (a *App) unlockCmd() *cobra.Command {
   bw unlock myPassword321 --raw`,
 		Args: cobra.MaximumNArgs(1),
 		Run: a.action(func(cmd *cobra.Command, args []string) output.Response {
-			st, resp := a.requireAuthed()
-			if resp != nil {
-				return *resp
+			c, err := a.requireAuthed()
+			if err != nil {
+				return errResp(err)
 			}
 			if boolean(cmd, "check") {
 				if a.isUnlocked() {
@@ -400,19 +239,15 @@ func (a *App) unlockCmd() *cobra.Command {
 			if len(args) > 0 {
 				pw = args[0]
 			}
-			password, resp := a.getPassword(pw, str(cmd, "passwordfile"), str(cmd, "passwordenv"), "Master password:")
-			if resp != nil {
-				return *resp
-			}
-			uk, err := unlockWithPassword(st.Account, password)
+			password, err := a.getPassword(pw, str(cmd, "passwordfile"), str(cmd, "passwordenv"), "Master password:")
 			if err != nil {
-				return output.Error("%v", err)
+				return errResp(err)
 			}
-			session, err := newSession(st.Account, uk)
+			if err := c.Unlock(password); err != nil {
+				return errResp(err)
+			}
+			session, err := c.NewSession()
 			if err != nil {
-				return output.Error("%v", err)
-			}
-			if err := st.Save(); err != nil {
 				return output.Error("%v", err)
 			}
 			return sessionMessage("Your vault is now unlocked!", session)
@@ -434,21 +269,18 @@ func (a *App) syncCmd() *cobra.Command {
   bw sync --last`,
 		Args: cobra.NoArgs,
 		Run: a.action(func(cmd *cobra.Command, args []string) output.Response {
-			st, resp := a.requireAuthed()
-			if resp != nil {
-				return *resp
+			c, err := a.requireAuthed()
+			if err != nil {
+				return errResp(err)
 			}
 			if boolean(cmd, "last") {
-				if st.Account.LastSync == nil {
+				last := c.LastSync()
+				if last == nil {
 					return output.Success(output.StringResponse{Object: "string"})
 				}
-				return output.String(jsTime(*st.Account.LastSync))
+				return output.String(jsTime(*last))
 			}
-			c, err := a.client()
-			if err != nil {
-				return output.Error("%v", err)
-			}
-			if err := a.fullSync(c, st, boolean(cmd, "force")); err != nil {
+			if err := c.Sync(context.Background(), boolean(cmd, "force")); err != nil {
 				return output.Error("Syncing failed: %v", err)
 			}
 			return output.Message("Syncing complete.", "", "")
@@ -457,42 +289,4 @@ func (a *App) syncCmd() *cobra.Command {
 	cmd.Flags().BoolP("force", "f", false, "Force a full sync.")
 	cmd.Flags().Bool("last", false, "Get the last sync date.")
 	return cmd
-}
-
-// fullSync downloads the vault unless the server revision is unchanged.
-func (a *App) fullSync(c *api.Client, st *state.State, force bool) error {
-	acc := st.Account
-	if !force && acc.LastSync != nil && len(acc.Vault) > 0 {
-		var ms int64
-		if err := c.Get("/accounts/revision-date", &ms); err == nil && ms > 0 {
-			if !time.UnixMilli(ms).After(*acc.LastSync) {
-				now := time.Now()
-				acc.LastSync = &now
-				return st.Save()
-			}
-		}
-	}
-	var raw json.RawMessage
-	if err := c.Get("/sync?excludeDomains=true", &raw); err != nil {
-		return err
-	}
-	var profile struct {
-		Profile struct {
-			Key        string `json:"key"`
-			PrivateKey string `json:"privateKey"`
-		} `json:"profile"`
-	}
-	if err := json.Unmarshal(raw, &profile); err != nil {
-		return err
-	}
-	if profile.Profile.Key != "" {
-		acc.EncUserKey = profile.Profile.Key
-	}
-	if profile.Profile.PrivateKey != "" {
-		acc.EncPrivateKey = profile.Profile.PrivateKey
-	}
-	acc.Vault = raw
-	now := time.Now()
-	acc.LastSync = &now
-	return st.Save()
 }

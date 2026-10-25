@@ -16,7 +16,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/yangxiang/bw/internal/output"
+	"github.com/oneryx/bw/internal/output"
 )
 
 func (a *App) serveCmd() *cobra.Command {
@@ -104,8 +104,9 @@ func (s *server) flags(path []string, q map[string][]string) []string {
 
 func (s *server) locked() *output.Response {
 	app := &App{serve: true, session: s.session}
-	if _, r := app.requireAuthed(); r != nil {
-		return r
+	if _, err := app.requireAuthed(); err != nil {
+		r := errResp(err)
+		return &r
 	}
 	if !app.isUnlocked() {
 		r := output.Error("Vault is locked.")

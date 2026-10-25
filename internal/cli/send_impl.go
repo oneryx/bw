@@ -1,10 +1,10 @@
 package cli
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -15,15 +15,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 
-	"github.com/yangxiang/bw/internal/api"
-	"github.com/yangxiang/bw/internal/crypto"
-	"github.com/yangxiang/bw/internal/output"
-	"github.com/yangxiang/bw/internal/state"
-	"github.com/yangxiang/bw/internal/vault"
+	"github.com/oneryx/bw"
+	"github.com/oneryx/bw/internal/crypto"
+	"github.com/oneryx/bw/internal/output"
+	"github.com/oneryx/bw/vault"
 )
-
-// sendURL mirrors Environment.getSendUrl for self-hosted servers.
-func sendURL(env state.Environment) string { return env.WebVaultURL() + "/#/send/" }
 
 // sendInput is the JSON accepted by send create/edit (SendResponse shape).
 type sendInput struct {
@@ -173,11 +169,11 @@ func (a *App) sendCreate(encoded string, opts sendCreateOptions) output.Response
 			in.MaxAccessCount = &n
 		}
 	}
-	v, resp := a.openVault()
-	if resp != nil {
-		return *resp
+	c, err := a.requireUnlocked()
+	if err != nil {
+		return errResp(err)
 	}
-	d := &vault.DecryptedSend{KeyMaterial: crypto.RandomBytes(16)}
+	d := &vault.DecryptedSend{}
 	d.Type = in.Type
 	d.Name = deref(in.Name)
 	d.Notes = in.Notes
@@ -198,7 +194,6 @@ func (a *App) sendCreate(encoded string, opts sendCreateOptions) output.Response
 		if path == "" {
 			return output.Error("Must specify a file to Send either with the --file option or in the request JSON.")
 		}
-		var err error
 		if fileData, err = os.ReadFile(path); err != nil {
 			return output.Error("%v", err)
 		}
@@ -227,16 +222,11 @@ func (a *App) sendCreate(encoded string, opts sendCreateOptions) output.Response
 	default:
 		return output.Error("Unknown Send type %s. Valid types are: file, text", sendTypeName(in.Type))
 	}
-	if strings.TrimSpace(password) != "" {
-		h := vault.SendPasswordHash(password, d.KeyMaterial)
-		d.Password = &h
-		at := vault.SendAuthPassword
-		d.AuthType = &at
-	} else {
-		at := vault.SendAuthNone
-		d.AuthType = &at
+	created, err := c.CreateSend(context.Background(), d, password, fileData)
+	if err != nil {
+		return errResp(err)
 	}
-	return a.saveSend(v, d, fileData, true)
+	return output.Success(vault.SendOutput(created, c.SendBaseURL()))
 }
 
 func sendTypeName(t int) string {
@@ -249,102 +239,24 @@ func sendTypeName(t int) string {
 	return "undefined"
 }
 
-// saveSend encrypts and uploads a Send (create when isNew), then caches and prints it.
-func (a *App) saveSend(v *vault.Vault, d *vault.DecryptedSend, fileData []byte, isNew bool) output.Response {
-	c, err := a.client()
-	if err != nil {
-		return output.Error("%v", err)
-	}
-	enc, err := v.EncryptSend(d)
-	if err != nil {
-		return output.Error("%v", err)
-	}
-	body := map[string]any{
-		"type": enc.Type, "name": enc.Name, "notes": enc.Notes, "key": enc.Key,
-		"maxAccessCount": enc.MaxAccessCount, "expirationDate": enc.ExpirationDate,
-		"deletionDate": enc.DeletionDate, "text": enc.Text, "password": enc.Password,
-		"disabled": enc.Disabled, "hideEmail": enc.HideEmail, "authType": enc.AuthType,
-	}
-	var raw json.RawMessage
-	switch {
-	case !isNew:
-		body["file"] = enc.File
-		err = c.Do(http.MethodPut, "/sends/"+d.ID, body, &raw)
-	case enc.Type == vault.SendTypeFile:
-		var encFile []byte
-		if encFile, err = crypto.EncryptBuffer(vault.SendCryptoKey(d.KeyMaterial), fileData); err != nil {
-			return output.Error("%v", err)
-		}
-		body["file"] = map[string]string{"fileName": enc.File.FileName}
-		body["fileLength"] = len(encFile)
-		var up struct {
-			FileUploadType int             `json:"fileUploadType"`
-			SendResponse   json.RawMessage `json:"sendResponse"`
-		}
-		if err = c.Do(http.MethodPost, "/sends/file/v2", body, &up); err != nil {
-			break
-		}
-		var created vault.Send
-		if err = json.Unmarshal(up.SendResponse, &created); err != nil {
-			break
-		}
-		if up.FileUploadType != 0 {
-			err = errors.New("unsupported Send file upload type")
-			break
-		}
-		mp, merr := api.Multipart(nil, "data", enc.File.FileName, encFile)
-		if merr != nil {
-			return output.Error("%v", merr)
-		}
-		if err = c.SendRaw(http.MethodPost, c.Env.APIURL()+"/sends/"+created.ID+"/file/"+created.File.ID, mp, nil); err != nil {
-			_ = c.Do(http.MethodDelete, "/sends/"+created.ID, nil, nil)
-			break
-		}
-		err = c.Get("/sends/"+created.ID, &raw)
-	default:
-		err = c.Do(http.MethodPost, "/sends", body, &raw)
-	}
+func (a *App) runSendList(cmd *cobra.Command, args []string) output.Response {
+	c, err := a.requireUnlocked()
 	if err != nil {
 		return errResp(err)
 	}
-	return a.cacheAndPrintSend(v, raw)
-}
-
-func (a *App) cacheAndPrintSend(v *vault.Vault, raw json.RawMessage) output.Response {
-	var s vault.Send
-	if err := json.Unmarshal(raw, &s); err != nil {
-		return output.Error("%v", err)
-	}
-	st, _ := a.state()
-	if err := st.Account.UpsertVaultObject("sends", raw); err != nil {
-		return output.Error("%v", err)
-	}
-	if err := st.Save(); err != nil {
-		return output.Error("%v", err)
-	}
-	material, err := crypto.DecryptBytes(v.UserKey, s.Key)
+	sends, err := c.Sends()
 	if err != nil {
-		return output.Error("%v", err)
+		return errResp(err)
 	}
-	return output.Success(vault.SendOutput(vault.DecryptSendWith(s, material), sendURL(st.Environment)))
-}
-
-func (a *App) runSendList(cmd *cobra.Command, args []string) output.Response {
-	v, resp := a.openVault()
-	if resp != nil {
-		return *resp
-	}
-	st, _ := a.state()
 	out := []vault.SendResponse{}
-	for _, s := range v.Sends() {
-		out = append(out, vault.SendOutput(s, sendURL(st.Environment)))
+	for _, s := range sends {
+		out = append(out, vault.SendOutput(s, c.SendBaseURL()))
 	}
 	return output.List(out)
 }
 
 // findSend mirrors SendGetCommand.getSendView.
-func findSend(v *vault.Vault, id string) ([]*vault.DecryptedSend, bool) {
-	sends := v.Sends()
+func findSend(sends []*vault.DecryptedSend, id string) ([]*vault.DecryptedSend, bool) {
 	if isGUID(id) {
 		for _, s := range sends {
 			if s.ID == strings.ToLower(id) {
@@ -361,18 +273,22 @@ func findSend(v *vault.Vault, id string) ([]*vault.DecryptedSend, bool) {
 }
 
 func (a *App) runSendGet(cmd *cobra.Command, args []string) output.Response {
-	v, resp := a.openVault()
-	if resp != nil {
-		return *resp
+	c, err := a.requireUnlocked()
+	if err != nil {
+		return errResp(err)
 	}
-	return a.sendGet(v, args[0], str(cmd, "output"), boolean(cmd, "text"))
+	return a.sendGet(c, args[0], str(cmd, "output"), boolean(cmd, "text"))
 }
 
-func (a *App) sendGet(v *vault.Vault, id, outPath string, text bool) output.Response {
+func (a *App) sendGet(c *bw.Client, id, outPath string, text bool) output.Response {
 	if a.serve && !isGUID(id) {
 		return output.Error("`%s` is not a GUID.", id)
 	}
-	sends, ok := findSend(v, id)
+	all, err := c.Sends()
+	if err != nil {
+		return errResp(err)
+	}
+	sends, ok := findSend(all, id)
 	if !ok {
 		return notFound()
 	}
@@ -395,8 +311,7 @@ func (a *App) sendGet(v *vault.Vault, id, outPath string, text bool) output.Resp
 		os.Stdout.WriteString(deref(sends[0].Text.Text))
 		return output.Success(nil)
 	}
-	st, _ := a.state()
-	return output.Success(vault.SendOutput(sends[0], sendURL(st.Environment)))
+	return output.Success(vault.SendOutput(sends[0], c.SendBaseURL()))
 }
 
 func (a *App) runSendEdit(cmd *cobra.Command, args []string) output.Response {
@@ -427,12 +342,16 @@ func (a *App) runSendEdit(cmd *cobra.Command, args []string) output.Response {
 		return output.Error("`itemid` was not provided.")
 	}
 	id := strings.ToLower(*in.ID)
-	v, resp := a.openVault()
-	if resp != nil {
-		return *resp
+	c, err := a.requireUnlocked()
+	if err != nil {
+		return errResp(err)
+	}
+	sends, err := c.Sends()
+	if err != nil {
+		return errResp(err)
 	}
 	var cur *vault.DecryptedSend
-	for _, s := range v.Sends() {
+	for _, s := range sends {
 		if s.ID == id {
 			cur = s
 		}
@@ -440,13 +359,12 @@ func (a *App) runSendEdit(cmd *cobra.Command, args []string) output.Response {
 	if cur == nil {
 		return notFound()
 	}
-	if cur.Type != in.Type {
-		return output.Error("Cannot change a Send's type")
-	}
 	// SendResponse.toView: request values replace the stored ones.
 	d := *cur
+	d.Type = in.Type
 	d.Name = deref(in.Name)
 	d.Notes = in.Notes
+	d.KeyMaterial = nil
 	if in.Key != nil {
 		if k, err := base64.StdEncoding.DecodeString(*in.Key); err == nil && len(k) > 0 {
 			d.KeyMaterial = k
@@ -468,194 +386,88 @@ func (a *App) runSendEdit(cmd *cobra.Command, args []string) output.Response {
 	}
 	d.ExpirationDate = in.ExpirationDate
 	d.Disabled, d.HideEmail = in.Disabled, in.HideEmail
-	d.Password = nil
-	at := vault.SendAuthNone
-	if in.Password != nil && strings.TrimSpace(*in.Password) != "" {
-		h := vault.SendPasswordHash(*in.Password, d.KeyMaterial)
-		d.Password = &h
-		at = vault.SendAuthPassword
-	} else if cur.Password != nil {
-		at = vault.SendAuthPassword
+	updated, err := c.UpdateSend(context.Background(), &d, deref(in.Password))
+	if err != nil {
+		return errResp(err)
 	}
-	d.AuthType = &at
-	return a.saveSend(v, &d, nil, false)
+	return output.Success(vault.SendOutput(updated, c.SendBaseURL()))
 }
 
 func (a *App) runSendRemovePassword(cmd *cobra.Command, args []string) output.Response {
-	v, resp := a.openVault()
-	if resp != nil {
-		return *resp
-	}
-	c, err := a.client()
+	c, err := a.requireUnlocked()
 	if err != nil {
-		return output.Error("%v", err)
-	}
-	var raw json.RawMessage
-	if err := c.Do(http.MethodPut, "/sends/"+args[0]+"/remove-password", nil, &raw); err != nil {
 		return errResp(err)
 	}
-	return a.cacheAndPrintSend(v, raw)
+	s, err := c.RemoveSendPassword(context.Background(), args[0])
+	if err != nil {
+		return errResp(err)
+	}
+	return output.Success(vault.SendOutput(s, c.SendBaseURL()))
 }
 
 func (a *App) runSendDelete(cmd *cobra.Command, args []string) output.Response {
-	v, resp := a.openVault()
-	if resp != nil {
-		return *resp
-	}
-	found := false
-	for _, s := range v.Sends() {
-		found = found || s.ID == args[0]
-	}
-	if !found {
-		return notFound()
-	}
-	c, err := a.client()
+	c, err := a.requireUnlocked()
 	if err != nil {
-		return output.Error("%v", err)
-	}
-	if err := c.Do(http.MethodDelete, "/sends/"+args[0], nil, nil); err != nil {
 		return errResp(err)
 	}
-	st, _ := a.state()
-	_ = st.Account.DeleteVaultObject("sends", args[0])
-	if err := st.Save(); err != nil {
-		return output.Error("%v", err)
+	if err := c.DeleteSend(context.Background(), args[0]); err != nil {
+		return errResp(err)
 	}
 	return output.Success(nil)
 }
 
 // --- receive ---
 
-type sendAccessError struct{ kind string }
-
-func (e *sendAccessError) Error() string { return e.kind }
-
 func (a *App) runReceive(cmd *cobra.Command, args []string) output.Response {
-	u, err := url.Parse(args[0])
-	if err != nil || u.Scheme == "" || u.Host == "" {
-		return output.Error("Failed to parse the provided Send url")
-	}
-	st, err := a.state()
+	c, err := a.client()
 	if err != nil {
 		return output.Error("%v", err)
 	}
-	env := st.Environment
-	origin := u.Scheme + "://" + u.Host
-	apiURL, identityURL := origin+"/api", origin+"/identity"
-	webVault, _ := url.Parse(env.WebVaultURL())
-	if webVault != nil && origin == webVault.Scheme+"://"+webVault.Host {
-		apiURL, identityURL = env.APIURL(), env.IdentityURL()
-	} else {
-		if a.noInteraction {
-			return output.Error("Send access will not be attempted: the domain in the Send URL does not match the configured domain. Run interactively in order to override.")
+	ctx := context.Background()
+	opts := bw.ReceiveOptions{Password: str(cmd, "password")}
+	if opts.Password == "" {
+		if f := str(cmd, "passwordfile"); f != "" {
+			opts.Password, _ = readFirstLine(f)
+		} else if e := str(cmd, "passwordenv"); e != "" {
+			opts.Password = os.Getenv(e)
 		}
+	}
+	r, err := c.ReceiveSend(ctx, args[0], opts)
+	if errors.Is(err, bw.ErrSendForeignHost) {
+		if a.noInteraction {
+			return output.Error("%v Run interactively in order to override.", err)
+		}
+		u, _ := url.Parse(args[0])
+		origin := u.Scheme + "://" + u.Host
 		ans := prompt("You are attempting to access a Send hosted on " + origin + " but your CLI is configured for " +
-			env.WebVaultURL() + ". Do not proceed if you do not trust " + origin + ". Do you want to proceed? (y/N)")
+			c.WebVaultURL() + ". Do not proceed if you do not trust " + origin + ". Do you want to proceed? (y/N)")
 		if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(ans)), "y") {
 			return output.Error("Send access cancelled.")
 		}
+		opts.AllowForeignHost = true
+		r, err = c.ReceiveSend(ctx, args[0], opts)
 	}
-	parts := strings.Split(strings.TrimPrefix(u.Fragment, "/"), "/")
-	if len(parts) < 2 || strings.TrimSpace(parts[len(parts)-2]) == "" || strings.TrimSpace(parts[len(parts)-1]) == "" {
-		return output.Error("Failed to parse url, the url provided is not a valid Send url")
+	if errors.Is(err, bw.ErrSendPasswordRequired) && !a.noInteraction {
+		if opts.Password = promptSecret("Send password:"); opts.Password != "" {
+			r, err = c.ReceiveSend(ctx, args[0], opts)
+		}
 	}
-	accessID, keyPart := parts[len(parts)-2], parts[len(parts)-1]
-	material, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(keyPart, "="))
-	if err != nil {
-		return output.Error("Failed to parse url, the url provided is not a valid Send url")
-	}
-	c := &api.Client{Env: state.Environment{API: apiURL, Identity: identityURL}, DeviceID: st.DeviceID}
-
-	getPassword := func() (string, *output.Response) {
-		pw := str(cmd, "password")
-		if pw == "" {
-			if f := str(cmd, "passwordfile"); f != "" {
-				pw, _ = readFirstLine(f)
-			} else if e := str(cmd, "passwordenv"); e != "" {
-				pw = os.Getenv(e)
-			}
-		}
-		if pw == "" && !a.noInteraction {
-			pw = promptSecret("Send password:")
-		}
-		if pw == "" {
-			r := output.Error("Password required")
-			return "", &r
-		}
-		return pw, nil
-	}
-
-	token, err := sendAccessToken(c, accessID, "")
-	var raw json.RawMessage
-	var legacy bool
-	switch e := err.(type) {
-	case nil:
-	case *sendAccessError:
-		switch e.kind {
-		case "send_id_invalid":
-			return notFound()
-		case "email_required", "email_invalid", "otp_required":
-			if a.noInteraction {
-				return output.Error("Email verification required. Run in interactive mode.")
-			}
-			return output.Error("Email-verified Sends are not supported by this CLI.")
-		case "password_hash_b64_required":
-			pw, r := getPassword()
-			if r != nil {
-				return *r
-			}
-			token, err = sendAccessToken(c, accessID, vault.SendPasswordHash(pw, material))
-			if se, ok := err.(*sendAccessError); ok && se.kind == "password_hash_b64_invalid" {
-				return output.Error("Invalid password")
-			}
-			if err != nil {
-				return errResp(err)
-			}
-		default:
-			return output.Error("Authentication failed")
-		}
-	default:
-		// Servers without the send_access grant: use the legacy access endpoint.
-		legacy = true
-	}
-	var pwHash string
-	if legacy {
-		err = c.SendAnonymous(http.MethodPost, "/sends/access/"+accessID, map[string]any{}, &raw)
-		if ae, ok := err.(*api.Error); ok && ae.Status == http.StatusUnauthorized {
-			pw, r := getPassword()
-			if r != nil {
-				return *r
-			}
-			pwHash = vault.SendPasswordHash(pw, material)
-			err = c.SendAnonymous(http.MethodPost, "/sends/access/"+accessID, map[string]any{"password": pwHash}, &raw)
-			if ae, ok := err.(*api.Error); ok && (ae.Status == http.StatusBadRequest || ae.Status == http.StatusUnauthorized) {
-				return output.Error("Invalid password")
-			}
-		}
-	} else {
-		c.Tokens = &state.Tokens{AccessToken: token, ExpiresAt: time.Now().Add(time.Hour)}
-		err = c.Do(http.MethodPost, "/sends/access", nil, &raw)
+	if errors.Is(err, bw.ErrSendEmailVerification) && a.noInteraction {
+		return output.Error("Email verification required. Run in interactive mode.")
 	}
 	if err != nil {
-		if api.IsNotFound(err) {
-			return notFound()
-		}
 		return errResp(err)
 	}
-	var s vault.Send
-	if err := json.Unmarshal(raw, &s); err != nil {
-		return output.Error("%v", err)
-	}
-	d := vault.DecryptSendWith(s, material)
+	d := r.DecryptedSend
 	if boolean(cmd, "obj") {
-		r := vault.SendAccessResponse{Object: "send-access", ID: d.ID, Name: d.Name, Type: d.Type}
+		resp := vault.SendAccessResponse{Object: "send-access", ID: d.ID, Name: d.Name, Type: d.Type}
 		if d.Type == vault.SendTypeText && d.Text != nil {
-			r.Text = &vault.SendTextResponse{Text: d.Text.Text, Hidden: d.Text.Hidden}
+			resp.Text = &vault.SendTextResponse{Text: d.Text.Text, Hidden: d.Text.Hidden}
 		}
 		if d.Type == vault.SendTypeFile && d.File != nil {
-			r.File = &vault.SendFileResponse{ID: d.File.ID, Size: string(d.File.Size), SizeName: d.File.SizeName, FileName: d.File.FileName}
+			resp.File = &vault.SendFileResponse{ID: d.File.ID, Size: string(d.File.Size), SizeName: d.File.SizeName, FileName: d.File.FileName}
 		}
-		return output.Success(r)
+		return output.Success(resp)
 	}
 	switch d.Type {
 	case vault.SendTypeText:
@@ -664,57 +476,11 @@ func (a *App) runReceive(cmd *cobra.Command, args []string) output.Response {
 		}
 		return output.Success(nil)
 	case vault.SendTypeFile:
-		var dl struct {
-			URL string `json:"url"`
-		}
-		if legacy {
-			err = c.SendAnonymous(http.MethodPost, "/sends/"+d.ID+"/access/file/"+d.File.ID, map[string]any{"password": nullable(pwHash)}, &dl)
-		} else {
-			err = c.Do(http.MethodPost, "/sends/access/file/"+d.File.ID, nil, &dl)
-		}
+		data, err := r.File(ctx)
 		if err != nil {
 			return errResp(err)
 		}
-		if !strings.HasPrefix(dl.URL, origin) && !strings.HasPrefix(dl.URL, apiURL) {
-			return output.Error("Download blocked: the file url failed a security check.")
-		}
-		encData, err := c.Download(dl.URL)
-		if err != nil {
-			return errResp(err)
-		}
-		plain, err := crypto.DecryptBuffer(vault.SendCryptoKey(material), encData)
-		if err != nil {
-			return output.Error("An error occurred while saving the attachment.")
-		}
-		return a.saveResultToFile(plain, str(cmd, "output"), filepath.Base(d.File.FileName))
+		return a.saveResultToFile(data, str(cmd, "output"), filepath.Base(d.File.FileName))
 	}
 	return output.Success(vault.SendAccessResponse{Object: "send-access", ID: d.ID, Name: d.Name, Type: d.Type})
-}
-
-func nullable(s string) *string {
-	if s == "" {
-		return nil
-	}
-	return &s
-}
-
-// sendAccessToken mints a token with the send_access grant.
-func sendAccessToken(c *api.Client, sendID, passwordHash string) (string, error) {
-	form := url.Values{"grant_type": {"send_access"}, "client_id": {"send"}, "scope": {"api.send.access"}, "send_id": {sendID}}
-	if passwordHash != "" {
-		form.Set("password_hash_b64", passwordHash)
-	}
-	tr, err := c.Token(form)
-	if err == nil {
-		return tr.AccessToken, nil
-	}
-	if ae, ok := err.(*api.Error); ok {
-		var body struct {
-			Type string `json:"send_access_error_type"`
-		}
-		if json.Unmarshal(ae.Body, &body) == nil && body.Type != "" {
-			return "", &sendAccessError{kind: body.Type}
-		}
-	}
-	return "", err
 }

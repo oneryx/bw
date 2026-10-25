@@ -8,7 +8,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/yangxiang/bw/internal/crypto"
+	"github.com/oneryx/bw/internal/crypto"
 )
 
 // DecryptError is the placeholder the official clients show for undecryptable values.

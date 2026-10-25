@@ -6,7 +6,7 @@ import (
 	"math/big"
 	"strings"
 
-	"github.com/yangxiang/bw/internal/wordlist"
+	"github.com/oneryx/bw/internal/wordlist"
 )
 
 // PasswordOptions mirrors the CLI generate options for passwords.

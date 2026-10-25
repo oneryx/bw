@@ -1,30 +1,22 @@
 package cli
 
 import (
-	"crypto/sha1"
-	"encoding/base64"
-	"encoding/hex"
+	"context"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
 
-	"github.com/yangxiang/bw/internal/api"
-	"github.com/yangxiang/bw/internal/crypto"
-	"github.com/yangxiang/bw/internal/output"
-	"github.com/yangxiang/bw/internal/totp"
-	"github.com/yangxiang/bw/internal/vault"
+	"github.com/oneryx/bw"
+	"github.com/oneryx/bw/internal/output"
+	"github.com/oneryx/bw/totp"
+	"github.com/oneryx/bw/vault"
 )
 
-var guidRe = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
-
-func isGUID(s string) bool { return guidRe.MatchString(s) }
+func isGUID(s string) bool { return bw.IsGUID(s) }
 
 // validateObject mirrors the official "Unknown object" check. `bw serve`
 // skips the program-level validation and reports the command's own message.
@@ -41,18 +33,27 @@ func validateObject(obj string, valid []string) *output.Response {
 }
 
 func multipleResults(ids []string) output.Response {
-	msg := "More than one result was found. Try getting a specific object by `id` instead. The following objects were found:"
-	for _, id := range ids {
-		msg += "\n" + id
-	}
-	r := output.Error("%s", msg)
-	r.Data = ids
-	return r
+	return errResp(&bw.MultipleResultsError{IDs: ids})
 }
 
 func notFound() output.Response { return output.Error("Not found.") }
 
 func isNullOrWhitespace(s *string) bool { return s == nil || strings.TrimSpace(*s) == "" }
+
+func mapIDs[T any](items []T, id func(T) string) []string {
+	out := make([]string, len(items))
+	for i, it := range items {
+		out[i] = id(it)
+	}
+	return out
+}
+
+func deref(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
 
 // --- list ---
 
@@ -61,17 +62,33 @@ func (a *App) runList(cmd *cobra.Command, args []string) output.Response {
 	if r := validateObject(obj, listObjects); r != nil {
 		return *r
 	}
-	v, resp := a.openVault()
-	if resp != nil {
-		return *resp
+	c, err := a.requireUnlocked()
+	if err != nil {
+		return errResp(err)
 	}
+	ctx := context.Background()
 	search := str(cmd, "search")
 	orgID := str(cmd, "organizationid")
 	switch strings.ToLower(obj) {
 	case "items":
-		return a.listItems(cmd, v)
+		items, err := c.Items(bw.ItemFilter{
+			Search: search, URL: str(cmd, "url"), FolderID: str(cmd, "folderid"),
+			CollectionID: str(cmd, "collectionid"), OrganizationID: orgID,
+			Trash: boolean(cmd, "trash"), Archived: boolean(cmd, "archived"),
+		})
+		if err != nil {
+			return errResp(err)
+		}
+		out := []vault.ItemResponse{}
+		for _, it := range items {
+			out = append(out, vault.ItemOutput(it))
+		}
+		return output.List(out)
 	case "folders":
-		folders := v.Folders()
+		folders, err := c.Folders()
+		if err != nil {
+			return errResp(err)
+		}
 		folders = append(folders, vault.Folder{Name: "No Folder"})
 		if strings.TrimSpace(search) != "" {
 			folders = vault.SearchByName(folders, search, func(f vault.Folder) string { return f.Name })
@@ -82,7 +99,10 @@ func (a *App) runList(cmd *cobra.Command, args []string) output.Response {
 		}
 		return output.List(out)
 	case "collections":
-		cols := v.Collections()
+		cols, err := c.Collections()
+		if err != nil {
+			return errResp(err)
+		}
 		if orgID != "" {
 			cols = slices.DeleteFunc(cols, func(c vault.Collection) bool { return c.OrganizationID != orgID })
 		}
@@ -90,12 +110,15 @@ func (a *App) runList(cmd *cobra.Command, args []string) output.Response {
 			cols = vault.SearchByName(cols, search, func(c vault.Collection) string { return c.Name })
 		}
 		out := []vault.CollectionResponse{}
-		for _, c := range cols {
-			out = append(out, vault.CollectionOutput(c))
+		for _, col := range cols {
+			out = append(out, vault.CollectionOutput(col))
 		}
 		return output.List(out)
 	case "organizations":
-		orgs := v.Organizations()
+		orgs, err := c.Organizations()
+		if err != nil {
+			return errResp(err)
+		}
 		if strings.TrimSpace(search) != "" {
 			orgs = vault.SearchByName(orgs, search, func(o vault.ProfileOrganization) string { return o.Name })
 		}
@@ -105,30 +128,12 @@ func (a *App) runList(cmd *cobra.Command, args []string) output.Response {
 		}
 		return output.List(out)
 	case "org-collections":
-		org, r := a.requireOrg(v, orgID)
-		if r != nil {
+		if r := checkOrgID(orgID); r != nil {
 			return *r
 		}
-		c, err := a.client()
+		cols, err := c.OrgCollections(ctx, orgID)
 		if err != nil {
-			return output.Error("%v", err)
-		}
-		var res struct {
-			Data []vault.Collection `json:"data"`
-		}
-		path := "/collections"
-		if org.Type <= 1 { // owner/admin can view all collections
-			path = "/organizations/" + orgID + "/collections"
-		}
-		if err := c.Get(path, &res); err != nil {
-			return output.Error("%v", err)
-		}
-		cols := []vault.Collection{}
-		for _, col := range res.Data {
-			if col.OrganizationID == orgID {
-				col.Name = v.DecryptCollectionName(orgID, col.Name)
-				cols = append(cols, col)
-			}
+			return errResp(err)
 		}
 		if strings.TrimSpace(search) != "" {
 			cols = vault.SearchByName(cols, search, func(c vault.Collection) string { return c.Name })
@@ -139,28 +144,15 @@ func (a *App) runList(cmd *cobra.Command, args []string) output.Response {
 		}
 		return output.List(out)
 	case "org-members":
-		if _, r := a.requireOrg(v, orgID); r != nil {
+		if r := checkOrgID(orgID); r != nil {
 			return *r
 		}
-		c, err := a.client()
+		members, err := c.OrgMembers(ctx, orgID)
 		if err != nil {
-			return output.Error("%v", err)
-		}
-		var res struct {
-			Data []struct {
-				ID               string  `json:"id"`
-				Email            string  `json:"email"`
-				Name             *string `json:"name"`
-				Status           int     `json:"status"`
-				Type             int     `json:"type"`
-				TwoFactorEnabled bool    `json:"twoFactorEnabled"`
-			} `json:"data"`
-		}
-		if err := c.Get("/organizations/"+orgID+"/users", &res); err != nil {
-			return output.Error("%v", err)
+			return errResp(err)
 		}
 		out := []vault.OrgMemberResponse{}
-		for _, u := range res.Data {
+		for _, u := range members {
 			out = append(out, vault.OrgMemberResponse{Object: "org-member", ID: u.ID, Email: u.Email,
 				Name: u.Name, Status: u.Status, Type: u.Type, TwoFactorEnabled: u.TwoFactorEnabled})
 		}
@@ -169,89 +161,17 @@ func (a *App) runList(cmd *cobra.Command, args []string) output.Response {
 	return output.Error("Unknown object.")
 }
 
-// requireOrg validates --organizationid for org-scoped commands.
-func (a *App) requireOrg(v *vault.Vault, orgID string) (*vault.ProfileOrganization, *output.Response) {
-	fail := func(format string, args ...any) (*vault.ProfileOrganization, *output.Response) {
-		r := output.Error(format, args...)
-		return nil, &r
-	}
+// checkOrgID validates --organizationid for org-scoped commands.
+func checkOrgID(orgID string) *output.Response {
 	if orgID == "" {
-		return fail("`organizationid` option is required.")
+		r := output.Error("`organizationid` option is required.")
+		return &r
 	}
 	if !isGUID(orgID) {
-		return fail("`%s` is not a GUID.", orgID)
+		r := output.Error("`%s` is not a GUID.", orgID)
+		return &r
 	}
-	for _, o := range v.Data.Profile.Organizations {
-		if o.ID == orgID {
-			return &o, nil
-		}
-	}
-	return fail("Organization not found.")
-}
-
-func isDeleted(c *vault.Cipher) bool  { return c.DeletedDate != nil }
-func isArchived(c *vault.Cipher) bool { return c.ArchivedDate != nil }
-
-func (a *App) listItems(cmd *cobra.Command, v *vault.Vault) output.Response {
-	trash, archived := boolean(cmd, "trash"), boolean(cmd, "archived")
-	folderID, collectionID, orgID := str(cmd, "folderid"), str(cmd, "collectionid"), str(cmd, "organizationid")
-	search, rawURL := str(cmd, "search"), str(cmd, "url")
-
-	ciphers := v.Ciphers()
-	if strings.TrimSpace(rawURL) != "" {
-		eq := v.EquivalentDomains(rawURL)
-		ciphers = slices.DeleteFunc(ciphers, func(c *vault.Cipher) bool {
-			return isDeleted(c) || isArchived(c) || !c.MatchesURL(rawURL, eq, vault.MatchDomain)
-		})
-	}
-	stateOK := func(c *vault.Cipher) bool { return trash == isDeleted(c) && archived == isArchived(c) }
-
-	if folderID != "" || collectionID != "" || orgID != "" {
-		ciphers = slices.DeleteFunc(ciphers, func(c *vault.Cipher) bool {
-			if !stateOK(c) {
-				return true
-			}
-			if folderID != "" {
-				if folderID == "notnull" && c.FolderID != nil {
-					return false
-				}
-				if (folderID == "null" && c.FolderID == nil) || (c.FolderID != nil && *c.FolderID == folderID) {
-					return false
-				}
-			}
-			if orgID != "" {
-				if orgID == "notnull" && c.OrganizationID != nil {
-					return false
-				}
-				if (orgID == "null" && c.OrganizationID == nil) || (c.OrganizationID != nil && *c.OrganizationID == orgID) {
-					return false
-				}
-			}
-			if collectionID != "" {
-				if collectionID == "notnull" && len(c.CollectionIDs) > 0 {
-					return false
-				}
-				if collectionID == "null" && len(c.CollectionIDs) == 0 {
-					return false
-				}
-				if collectionID != "null" && slices.Contains(c.CollectionIDs, collectionID) {
-					return false
-				}
-			}
-			return true
-		})
-	} else if strings.TrimSpace(search) == "" {
-		ciphers = slices.DeleteFunc(ciphers, func(c *vault.Cipher) bool { return !stateOK(c) })
-	}
-	if strings.TrimSpace(search) != "" {
-		ciphers = slices.DeleteFunc(ciphers, func(c *vault.Cipher) bool { return !stateOK(c) })
-		ciphers = vault.SearchCiphers(ciphers, search)
-	}
-	out := []vault.ItemResponse{}
-	for _, c := range ciphers {
-		out = append(out, vault.ItemOutput(c))
-	}
-	return output.List(out)
+	return nil
 }
 
 // --- get ---
@@ -271,37 +191,38 @@ func (a *App) runGet(cmd *cobra.Command, args []string) output.Response {
 		}
 		return output.Template(t)
 	}
-	v, resp := a.openVault()
-	if resp != nil {
-		return *resp
+	c, err := a.requireUnlocked()
+	if err != nil {
+		return errResp(err)
 	}
+	ctx := context.Background()
 	switch strings.ToLower(obj) {
 	case "item":
-		c, r := a.findCipher(v, id, nil)
-		if r != nil {
-			return *r
+		it, err := c.FindItem(id, nil)
+		if err != nil {
+			return errResp(err)
 		}
-		return output.Success(vault.ItemOutput(c))
+		return output.Success(vault.ItemOutput(it))
 	case "username":
-		return a.getLoginField(v, id, "username", "No username available for this login.", func(c *vault.Cipher) *string { return c.Login.Username })
+		return getLoginField(c, id, "No username available for this login.", func(c *vault.Cipher) *string { return c.Login.Username })
 	case "password":
-		return a.getLoginField(v, id, "password", "No password available for this login.", func(c *vault.Cipher) *string { return c.Login.Password })
+		return getLoginField(c, id, "No password available for this login.", func(c *vault.Cipher) *string { return c.Login.Password })
 	case "uri":
-		c, r := a.findCipher(v, id, func(c *vault.Cipher) bool {
+		it, err := c.FindItem(id, func(c *vault.Cipher) bool {
 			return c.Type == vault.TypeLogin && c.Login != nil && len(c.Login.URIs) > 0 && deref(c.Login.URIs[0].URI) != ""
 		})
-		if r != nil {
-			return *r
+		if err != nil {
+			return errResp(err)
 		}
-		if c.Type != vault.TypeLogin {
+		if it.Type != vault.TypeLogin {
 			return output.Error("Not a login.")
 		}
-		if c.Login == nil || len(c.Login.URIs) == 0 || deref(c.Login.URIs[0].URI) == "" {
+		if it.Login == nil || len(it.Login.URIs) == 0 || deref(it.Login.URIs[0].URI) == "" {
 			return output.Error("No uri available for this login.")
 		}
-		return output.String(*c.Login.URIs[0].URI)
+		return output.String(*it.Login.URIs[0].URI)
 	case "totp":
-		r := a.getLoginField(v, id, "totp", "No TOTP available for this login.", func(c *vault.Cipher) *string { return c.Login.Totp })
+		r := getLoginField(c, id, "No TOTP available for this login.", func(c *vault.Cipher) *string { return c.Login.Totp })
 		if !r.Success {
 			return r
 		}
@@ -311,232 +232,113 @@ func (a *App) runGet(cmd *cobra.Command, args []string) output.Response {
 		}
 		return output.String(code)
 	case "notes":
-		c, r := a.findCipher(v, id, func(c *vault.Cipher) bool { return !isNullOrWhitespace(c.Notes) })
-		if r != nil {
-			return *r
+		it, err := c.FindItem(id, func(c *vault.Cipher) bool { return !isNullOrWhitespace(c.Notes) })
+		if err != nil {
+			return errResp(err)
 		}
-		if isNullOrWhitespace(c.Notes) {
+		if isNullOrWhitespace(it.Notes) {
 			return output.Error("No notes available for this item.")
 		}
-		return output.String(*c.Notes)
+		return output.String(*it.Notes)
 	case "exposed":
-		r := a.getLoginField(v, id, "password", "No password available for this login.", func(c *vault.Cipher) *string { return c.Login.Password })
+		r := getLoginField(c, id, "No password available for this login.", func(c *vault.Cipher) *string { return c.Login.Password })
 		if !r.Success {
 			return r
 		}
-		n, err := pwnedCount(*r.Data.(output.StringResponse).Data)
+		n, err := c.PasswordExposures(ctx, *r.Data.(output.StringResponse).Data)
 		if err != nil {
 			return output.Error("%v", err)
 		}
 		return output.String(fmt.Sprint(n))
 	case "attachment":
-		return a.getAttachment(v, id, str(cmd, "itemid"), str(cmd, "output"))
+		return a.getAttachment(c, id, str(cmd, "itemid"), str(cmd, "output"))
 	case "folder":
-		var found *vault.Folder
-		folders := v.Folders()
-		if isGUID(id) {
-			for i := range folders {
-				if folders[i].ID == id {
-					found = &folders[i]
-				}
-			}
-		} else if strings.TrimSpace(id) != "" {
-			m := vault.SearchByName(folders, id, func(f vault.Folder) string { return f.Name })
-			if len(m) > 1 {
-				return multipleResults(mapIDs(m, func(f vault.Folder) string { return f.ID }))
-			}
-			if len(m) == 1 {
-				found = &m[0]
-			}
+		folders, err := c.Folders()
+		if err != nil {
+			return errResp(err)
 		}
-		if found == nil {
-			return notFound()
+		f, r := findByIDOrName(folders, id, func(f vault.Folder) string { return f.ID }, func(f vault.Folder) string { return f.Name })
+		if r != nil {
+			return *r
 		}
-		return output.Success(vault.FolderOutput(*found))
+		return output.Success(vault.FolderOutput(*f))
 	case "collection":
-		var found *vault.Collection
-		cols := v.Collections()
-		if isGUID(id) {
-			for i := range cols {
-				if cols[i].ID == id {
-					found = &cols[i]
-				}
-			}
-		} else if strings.TrimSpace(id) != "" {
-			m := vault.SearchByName(cols, id, func(c vault.Collection) string { return c.Name })
-			if len(m) > 1 {
-				return multipleResults(mapIDs(m, func(c vault.Collection) string { return c.ID }))
-			}
-			if len(m) == 1 {
-				found = &m[0]
-			}
+		cols, err := c.Collections()
+		if err != nil {
+			return errResp(err)
 		}
-		if found == nil {
-			return notFound()
+		col, r := findByIDOrName(cols, id, func(c vault.Collection) string { return c.ID }, func(c vault.Collection) string { return c.Name })
+		if r != nil {
+			return *r
 		}
 		if isGUID(id) {
 			// Lookup by id decrypts the stored collection directly, keeping a null externalId.
-			return output.Success(vault.APICollectionOutput(*found))
+			return output.Success(vault.APICollectionOutput(*col))
 		}
-		return output.Success(vault.CollectionOutput(*found))
+		return output.Success(vault.CollectionOutput(*col))
 	case "org-collection":
-		return a.getOrgCollection(v, id, str(cmd, "organizationid"))
+		return getOrgCollection(c, id, str(cmd, "organizationid"))
 	case "organization":
-		var found *vault.ProfileOrganization
-		orgs := v.Organizations()
-		if isGUID(id) {
-			for i := range orgs {
-				if orgs[i].ID == id {
-					found = &orgs[i]
-				}
-			}
-		} else if strings.TrimSpace(id) != "" {
-			m := vault.SearchByName(orgs, id, func(o vault.ProfileOrganization) string { return o.Name })
-			if len(m) > 1 {
-				return multipleResults(mapIDs(m, func(o vault.ProfileOrganization) string { return o.ID }))
-			}
-			if len(m) == 1 {
-				found = &m[0]
-			}
+		orgs, err := c.Organizations()
+		if err != nil {
+			return errResp(err)
 		}
-		if found == nil {
-			return notFound()
+		o, r := findByIDOrName(orgs, id, func(o vault.ProfileOrganization) string { return o.ID }, func(o vault.ProfileOrganization) string { return o.Name })
+		if r != nil {
+			return *r
 		}
-		return output.Success(vault.OrganizationOutput(*found))
+		return output.Success(vault.OrganizationOutput(*o))
 	case "fingerprint":
-		return a.getFingerprint(v, id)
+		phrase, err := c.Fingerprint(ctx, id)
+		if err != nil {
+			return errResp(err)
+		}
+		return output.String(phrase)
 	case "send":
-		return a.sendGet(v, args[1], "", false)
+		return a.sendGet(c, args[1], "", false)
 	}
 	return output.Error("Unknown object.")
 }
 
-func mapIDs[T any](items []T, id func(T) string) []string {
-	out := make([]string, len(items))
-	for i, it := range items {
-		out[i] = id(it)
-	}
-	return out
-}
-
-func deref(s *string) string {
-	if s == nil {
-		return ""
-	}
-	return *s
-}
-
-// findCipher mirrors GetCommand.getCipher: id lookup or basic search, with an
-// optional filter applied to multiple/single results.
-func (a *App) findCipher(v *vault.Vault, id string, filter func(*vault.Cipher) bool) (*vault.Cipher, *output.Response) {
-	fail := func(r output.Response) (*vault.Cipher, *output.Response) { return nil, &r }
-	var found *vault.Cipher
+// findByIDOrName looks up an object by id, or else by a unique name search.
+func findByIDOrName[T any](items []T, id string, idOf, nameOf func(T) string) (*T, *output.Response) {
+	fail := func(r output.Response) (*T, *output.Response) { return nil, &r }
 	if isGUID(id) {
-		if raw := v.RawCipher(id); raw != nil {
-			found = v.Decrypt(raw)
+		for i := range items {
+			if idOf(items[i]) == id {
+				return &items[i], nil
+			}
 		}
 	} else if strings.TrimSpace(id) != "" {
-		cs := slices.DeleteFunc(v.Ciphers(), func(c *vault.Cipher) bool { return isDeleted(c) || isArchived(c) })
-		cs = vault.SearchCiphers(cs, id)
-		if len(cs) > 1 {
-			if filter != nil {
-				cs = slices.DeleteFunc(cs, func(c *vault.Cipher) bool { return !filter(c) })
-			}
-			if len(cs) == 0 {
-				return fail(notFound())
-			}
-			if len(cs) > 1 {
-				return fail(multipleResults(mapIDs(cs, func(c *vault.Cipher) string { return c.ID })))
-			}
-			return cs[0], nil
+		m := vault.SearchByName(items, id, nameOf)
+		if len(m) > 1 {
+			return fail(multipleResults(mapIDs(m, idOf)))
 		}
-		if len(cs) == 1 {
-			found = cs[0]
+		if len(m) == 1 {
+			return &m[0], nil
 		}
 	}
-	if found == nil || (filter != nil && !filter(found)) {
-		return fail(notFound())
-	}
-	return found, nil
+	return fail(notFound())
 }
 
-func (a *App) getLoginField(v *vault.Vault, id, field, missing string, get func(*vault.Cipher) *string) output.Response {
-	c, r := a.findCipher(v, id, func(c *vault.Cipher) bool {
+func getLoginField(c *bw.Client, id, missing string, get func(*vault.Cipher) *string) output.Response {
+	it, err := c.FindItem(id, func(c *vault.Cipher) bool {
 		return c.Type == vault.TypeLogin && c.Login != nil && !isNullOrWhitespace(get(c))
 	})
-	if r != nil {
-		return *r
+	if err != nil {
+		return errResp(err)
 	}
-	if c.Type != vault.TypeLogin || c.Login == nil {
+	if it.Type != vault.TypeLogin || it.Login == nil {
 		return output.Error("Not a login.")
 	}
-	val := get(c)
+	val := get(it)
 	if isNullOrWhitespace(val) {
 		return output.Error("%s", missing)
 	}
 	return output.String(*val)
 }
 
-// pwnedCount queries the HIBP range API (k-anonymity).
-func pwnedCount(password string) (int, error) {
-	sum := sha1.Sum([]byte(password))
-	h := strings.ToUpper(hex.EncodeToString(sum[:]))
-	resp, err := http.Get("https://api.pwnedpasswords.com/range/" + h[:5])
-	if err != nil {
-		return 0, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return 0, err
-	}
-	for _, line := range strings.Split(string(body), "\n") {
-		suffix, count, ok := strings.Cut(strings.TrimSpace(line), ":")
-		if ok && suffix == h[5:] {
-			var n int
-			fmt.Sscan(count, &n)
-			return n, nil
-		}
-	}
-	return 0, nil
-}
-
-func (a *App) getFingerprint(v *vault.Vault, id string) output.Response {
-	st, _ := a.state()
-	var phrase string
-	var err error
-	if id == "me" {
-		pub, perr := v.PublicKey()
-		if perr != nil {
-			return output.Error("No public key available for the active user.")
-		}
-		phrase, err = crypto.Fingerprint(st.Account.UserID, pub)
-	} else if isGUID(id) {
-		c, cerr := a.client()
-		if cerr != nil {
-			return output.Error("%v", cerr)
-		}
-		var res struct {
-			PublicKey string `json:"publicKey"`
-		}
-		if c.Get("/users/"+id+"/public-key", &res) != nil {
-			return notFound()
-		}
-		pub, derr := base64.StdEncoding.DecodeString(res.PublicKey)
-		if derr != nil {
-			return notFound()
-		}
-		phrase, err = crypto.Fingerprint(id, pub)
-	} else {
-		return notFound()
-	}
-	if err != nil {
-		return notFound()
-	}
-	return output.String(phrase)
-}
-
-func (a *App) getOrgCollection(v *vault.Vault, id, orgID string) output.Response {
+func getOrgCollection(c *bw.Client, id, orgID string) output.Response {
 	if orgID == "" {
 		return output.Error("`organizationid` option is required.")
 	}
@@ -546,42 +348,34 @@ func (a *App) getOrgCollection(v *vault.Vault, id, orgID string) output.Response
 	if !isGUID(orgID) {
 		return output.Error("`%s` is not a GUID.", orgID)
 	}
-	if _, err := v.OrgKey(orgID); err != nil {
-		return output.Error("%v", err)
-	}
-	c, err := a.client()
+	col, err := c.OrgCollection(context.Background(), orgID, id)
 	if err != nil {
-		return output.Error("%v", err)
+		return errResp(err)
 	}
-	var res struct {
-		vault.Collection
-		Groups []vault.SelectionReadOnly `json:"groups"`
-		Users  []vault.SelectionReadOnly `json:"users"`
+	return output.Success(orgCollectionOutput(col))
+}
+
+func orgCollectionOutput(col *bw.OrgCollection) vault.OrgCollectionResponse {
+	return vault.OrgCollectionResponse{
+		Object: "org-collection", ID: col.ID, OrganizationID: col.OrganizationID, Name: col.Name,
+		ExternalID: col.ExternalID, Groups: col.Groups, Users: col.Users,
 	}
-	if err := c.Get("/organizations/"+orgID+"/collections/"+id+"/details", &res); err != nil {
-		return output.Error("%v", err)
-	}
-	return output.Success(vault.OrgCollectionResponse{
-		Object: "org-collection", ID: res.ID, OrganizationID: res.OrganizationID,
-		Name: v.DecryptCollectionName(orgID, res.Name), ExternalID: res.ExternalID,
-		Groups: res.Groups, Users: res.Users,
-	})
 }
 
 // getAttachment downloads and decrypts an attachment.
-func (a *App) getAttachment(v *vault.Vault, id, itemID, outPath string) output.Response {
+func (a *App) getAttachment(c *bw.Client, id, itemID, outPath string) output.Response {
 	if itemID == "" {
 		return output.Error("--itemid <itemid> required.")
 	}
-	c, r := a.findCipher(v, strings.ToLower(itemID), nil)
-	if r != nil {
-		return *r
+	it, err := c.FindItem(itemID, nil)
+	if err != nil {
+		return errResp(err)
 	}
-	if len(c.Attachments) == 0 {
+	if len(it.Attachments) == 0 {
 		return output.Error("No attachments available for this item.")
 	}
 	var matches []vault.Attachment
-	for _, at := range c.Attachments {
+	for _, at := range it.Attachments {
 		if strings.ToLower(at.ID) == id || strings.Contains(strings.ToLower(at.FileName), id) {
 			matches = append(matches, at)
 		}
@@ -602,53 +396,11 @@ func (a *App) getAttachment(v *vault.Vault, id, itemID, outPath string) output.R
 		return multipleResults(mapIDs(matches, func(at vault.Attachment) string { return at.ID }))
 	}
 	att := matches[0]
-	client, err := a.client()
+	data, err := c.Attachment(context.Background(), it.ID, att.ID)
 	if err != nil {
-		return output.Error("%v", err)
-	}
-	data, err := a.downloadAttachment(client, v, c.ID, att)
-	if err != nil {
-		return output.Error("%v", err)
+		return errResp(err)
 	}
 	return a.saveResultToFile(data, outPath, filepath.Base(att.FileName))
-}
-
-func (a *App) downloadAttachment(client *api.Client, v *vault.Vault, cipherID string, att vault.Attachment) ([]byte, error) {
-	url := deref(att.URL)
-	var meta struct {
-		URL string `json:"url"`
-	}
-	if err := client.Get("/ciphers/"+cipherID+"/attachment/"+att.ID, &meta); err == nil && meta.URL != "" {
-		url = meta.URL
-	} else if err != nil && !api.IsNotFound(err) {
-		return nil, err
-	}
-	enc, err := client.Download(url)
-	if err != nil {
-		if ae, ok := err.(*api.Error); ok {
-			return nil, fmt.Errorf("A %d error occurred while downloading the attachment.", ae.Status)
-		}
-		return nil, err
-	}
-	raw := v.RawCipher(cipherID)
-	key, err := v.CipherKey(raw)
-	if err != nil {
-		return nil, err
-	}
-	// Attachment keys are wrapped with the cipher (or user/org) key. Look up the
-	// encrypted key from the raw cipher since att holds decrypted values.
-	for _, ra := range raw.Attachments {
-		if ra.ID == att.ID && ra.Key != nil && *ra.Key != "" {
-			if key, err = crypto.DecryptKey(key, *ra.Key); err != nil {
-				return nil, err
-			}
-		}
-	}
-	plain, err := crypto.DecryptBuffer(key, enc)
-	if err != nil {
-		return nil, fmt.Errorf("An error occurred while saving the attachment.")
-	}
-	return plain, nil
 }
 
 // saveResultToFile mirrors CliUtils.saveResultToFile.

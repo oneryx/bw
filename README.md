@@ -1,4 +1,4 @@
-# bw — a Go Bitwarden CLI for Vaultwarden
+# bw — a Go Bitwarden CLI and client library for Vaultwarden
 
 A single static binary (~11 MB, vs ~137 MB for the official Node build) that
 re-implements the [official Bitwarden CLI](https://bitwarden.com/help/cli/)
@@ -6,6 +6,12 @@ for self-hosted [Vaultwarden](https://github.com/dani-garcia/vaultwarden)
 servers. Commands, arguments, flags, environment variables, JSON output and
 exit codes follow the official CLI (verified side-by-side against `bw`
 2026.10.0 and Vaultwarden 1.37), so existing scripts keep working.
+
+The same functionality is available as a Go library (`github.com/oneryx/bw`)
+for other applications, e.g. GUI clients. See [Library](#library).
+
+Only current Vaultwarden releases are supported (tested with 1.37); fallbacks
+for older server APIs have been removed.
 
 ## Build
 
@@ -39,28 +45,31 @@ is only stored wrapped by the session key (`BW_SESSION`).
 
 ## Supported commands
 
-`login` (password, `--apikey`, `--sso`, 2FA: authenticator, email, YubiKey OTP),
+`login` (password, `--apikey`, 2FA: authenticator, email),
 `logout`, `lock`, `unlock`, `sync`, `status`, `config server`, `list`, `get`
 (incl. `totp`, `exposed`, `attachment`, `fingerprint`, `template`), `create`,
 `edit`, `delete`, `restore`, `archive`, `move`/`share`, `confirm org-member`,
 `import`, `export` (`csv`, `json`, `encrypted_json`, `zip`, password-protected,
 organization exports), `generate`, `encode`, `send` (+ `list`, `template`, `get`,
-`create`, `edit`, `remove-password`, `delete`), `receive`, `serve` (REST API),
-`completion` (zsh, bash, fish, powershell), `update`, `sdk-version`.
+`create`, `edit`, `remove-password`, `delete`), `receive`, `serve` (REST API).
 
 Import formats: `bitwardencsv`, `bitwardenjson` (plain, account-encrypted and
-password-protected), `chromecsv`, `bravecsv`, `edgecsv`, `operacsv`,
-`vivaldicsv`, `firefoxcsv`, `keepass2xml`, `keepassxcsv`, `lastpasscsv`.
+password-protected), `keepass2xml`, `keepassxcsv`.
 
 ## Differences from the official CLI
 
 Not implemented (not available on Vaultwarden, or not ported yet):
 
 - `device-approval` (Bitwarden-only), Key Connector, `report password-health`.
-- Duo and WebAuthn two-step login (need a browser; the official CLI lacks WebAuthn too).
+- SSO login (`--sso`), `completion`, `update`, `sdk-version`.
+- Data in old encryption formats (AES-CBC without HMAC, RSA with HMAC);
+  login to such accounts fails with "Legacy encryption is no longer supported".
+- Two-step login other than authenticator app and email (no YubiKey OTP, Duo
+  or WebAuthn).
 - Email-verified Sends (`--emails`) return a clear error.
-- Import formats other than those listed above (e.g. 1Password, Dashlane,
-  `keepasskdbx`); `bw import --formats` lists only what is supported.
+- Import formats other than those listed above (e.g. Chrome, Firefox,
+  LastPass, 1Password, `keepasskdbx`); `bw import --formats` lists only what
+  is supported.
 - `bw serve` on `fd+...` hostnames; `update` does not self-update.
 
 Intentional behavior differences:
@@ -73,8 +82,51 @@ Intentional behavior differences:
 - Official bugs are not reproduced: `send get --text` with several matches
   (stack overflow), missing keys in `serve`'s send list, and `receive`
   accepting a wrong Send password after a cached successful access.
-- `bw login --sso` is implemented (PKCE, local callback on ports 8065-8070) but
-  has only been exercised up to the token exchange, not against a real IdP.
+
+## Library
+
+```go
+import (
+	"github.com/oneryx/bw"
+	"github.com/oneryx/bw/vault"
+)
+
+c, err := bw.New(bw.Options{Store: bw.FileStore("/path/to/data.json")})
+if err != nil { ... }
+if !c.LoggedIn() {
+	_ = c.SetServerConfig(bw.ServerConfig{Base: "https://vault.example.com"})
+	err = c.Login(ctx, bw.LoginOptions{Email: email, Password: password})
+	var tf *bw.TwoFactorRequiredError
+	if errors.As(err, &tf) {
+		// tf.Providers lists the available methods; tf.SendEmail sends an email code.
+		err = tf.Submit(ctx, bw.TwoFactorAuthenticator, code)
+	}
+} else {
+	err = c.Unlock(password) // the user key is kept in memory only
+}
+items, err := c.Items(bw.ItemFilter{Search: "github"})
+item, err := c.CreateItem(ctx, &vault.Cipher{Type: vault.TypeLogin, Name: "Example", Login: &vault.Login{...}})
+```
+
+- `bw.Client` covers everything the CLI does: login/unlock/lock/sync, items
+  (incl. attachments, trash, archive, move to organization), folders,
+  collections, organizations and members, Sends (create, edit, receive),
+  import and export. All methods are safe for concurrent use; network calls
+  take a `context.Context`.
+- Errors are values: `bw.ErrLocked`, `bw.ErrNotFound`,
+  `*bw.MultipleResultsError`, `*bw.TwoFactorRequiredError`, `*bw.APIError`, …
+  Messages match the official CLI and can be shown to users.
+- State goes through a `bw.Store` (`FileStore`, `MemoryStore`, or your own,
+  e.g. the OS keychain). The vault stays encrypted in the store.
+- `NewSession`/`UnlockWithSession` provide the CLI's `BW_SESSION` mechanism if
+  several processes need to share an unlocked vault.
+- `github.com/oneryx/bw/vault` holds the data model (`vault.Cipher`,
+  `vault.Folder`, `vault.DecryptedSend`, …), search and URI matching;
+  `github.com/oneryx/bw/generator` and `github.com/oneryx/bw/totp` generate
+  passwords/passphrases and TOTP codes.
+
+The CLI (`internal/cli`) is a thin layer over this API that adds prompts,
+flags and output formatting.
 
 ## Debugging
 

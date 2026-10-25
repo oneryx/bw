@@ -8,11 +8,11 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/yangxiang/bw/internal/output"
-	"github.com/yangxiang/bw/internal/state"
+	"github.com/oneryx/bw"
+	"github.com/oneryx/bw/internal/output"
 )
 
-// Version is set at build time with -ldflags "-X github.com/yangxiang/bw/internal/cli.Version=...".
+// Version is set at build time with -ldflags "-X github.com/oneryx/bw/internal/cli.Version=...".
 var Version = "dev"
 
 // App carries per-invocation state shared by all commands.
@@ -26,7 +26,7 @@ type App struct {
 	serve    bool
 	captured *output.Response
 
-	st *state.State
+	bw *bw.Client
 }
 
 func envTrue(name string) bool { return os.Getenv(name) == "true" }
@@ -52,14 +52,12 @@ func Execute(args []string) int {
 
 func (a *App) newRootCmd() *cobra.Command {
 	root := &cobra.Command{
-		Use:           "bw",
-		Short:         "Bitwarden CLI (Go implementation for Vaultwarden)",
-		Version:       Version,
-		SilenceErrors: true,
-		SilenceUsage:  true,
-		CompletionOptions: cobra.CompletionOptions{
-			DisableDefaultCmd: true, // replaced by the official-style `completion --shell`
-		},
+		Use:               "bw",
+		Short:             "Bitwarden CLI (Go implementation for Vaultwarden)",
+		Version:           Version,
+		SilenceErrors:     true,
+		SilenceUsage:      true,
+		CompletionOptions: cobra.CompletionOptions{DisableDefaultCmd: true},
 		Example: `  bw login
   bw lock
   bw unlock myPassword321
@@ -97,10 +95,8 @@ func (a *App) newRootCmd() *cobra.Command {
 	pf.String("session", "", "Pass session key instead of reading from env.")
 
 	root.AddCommand(
-		a.sdkVersionCmd(),
 		a.loginCmd(), a.logoutCmd(), a.lockCmd(), a.unlockCmd(), a.syncCmd(),
-		a.generateCmd(), a.encodeCmd(), a.configCmd(), a.updateCmd(),
-		a.completionCmd(), a.statusCmd(),
+		a.generateCmd(), a.encodeCmd(), a.configCmd(), a.statusCmd(),
 		a.listCmd(), a.getCmd(), a.createCmd(), a.editCmd(), a.deleteCmd(),
 		a.archiveCmd(), a.restoreCmd(), a.moveCmd(false), a.moveCmd(true),
 		a.confirmCmd(), a.importCmd(), a.exportCmd(),
@@ -146,19 +142,6 @@ func (a *App) action(fn func(cmd *cobra.Command, args []string) output.Response)
 	}
 }
 
-// state lazily loads data.json.
-func (a *App) state() (*state.State, error) {
-	if a.st != nil {
-		return a.st, nil
-	}
-	st, err := state.Load()
-	if err != nil {
-		return nil, err
-	}
-	a.st = st
-	return st, nil
-}
-
 // Flag helpers keep command definitions short.
 func str(cmd *cobra.Command, name string) string {
 	v, _ := cmd.Flags().GetString(name)
@@ -174,7 +157,7 @@ func changed(cmd *cobra.Command, name string) bool { return cmd.Flags().Changed(
 
 // optionalValueFlags are commander options declared as "--flag [value]": the
 // value is taken from the next argument unless it looks like an option.
-var optionalValueFlags = map[string]string{"export": "--password", "login": "--sso"}
+var optionalValueFlags = map[string]string{"export": "--password"}
 
 // joinOptionalValues rewrites "--flag value" into "--flag=value" for those
 // options, because pflag only accepts "--flag=value" for optional values.

@@ -28,17 +28,21 @@ func PublicKeyDER(k *rsa.PrivateKey) ([]byte, error) {
 	return x509.MarshalPKIXPublicKey(&k.PublicKey)
 }
 
-// DecryptRSA decrypts an asymmetric EncString (types 3-6).
+// DecryptRSA decrypts an asymmetric EncString: type 3 (RSA-OAEP-SHA256) or
+// type 4 (RSA-OAEP-SHA1).
 func DecryptRSA(priv *rsa.PrivateKey, s string) ([]byte, error) {
 	t, parts, err := splitEncString(s)
 	if err != nil {
 		return nil, err
 	}
+	if len(parts) != 1 {
+		return nil, ErrInvalidFormat
+	}
 	var h hash.Hash
-	switch {
-	case (t == 3 && len(parts) == 1) || (t == 5 && len(parts) == 2):
+	switch t {
+	case 3:
 		h = sha256.New()
-	case (t == 4 && len(parts) == 1) || (t == 6 && len(parts) == 2):
+	case 4:
 		h = sha1.New()
 	default:
 		return nil, ErrInvalidFormat

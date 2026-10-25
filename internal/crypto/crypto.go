@@ -19,7 +19,7 @@ import (
 
 	"golang.org/x/crypto/argon2"
 
-	"github.com/yangxiang/bw/internal/wordlist"
+	"github.com/oneryx/bw/internal/wordlist"
 )
 
 var (
@@ -44,22 +44,18 @@ type KDFParams struct {
 	Parallelism int
 }
 
-// SymmetricKey is an AES-256-CBC key with an optional HMAC-SHA256 key.
+// SymmetricKey is an AES-256-CBC key with an HMAC-SHA256 key.
 type SymmetricKey struct {
 	Enc []byte
 	Mac []byte
 }
 
-// NewSymmetricKey builds a key from raw bytes: 64 bytes = enc||mac, 32 bytes = enc only.
+// NewSymmetricKey builds a key from 64 raw bytes (enc||mac).
 func NewSymmetricKey(b []byte) (*SymmetricKey, error) {
-	switch len(b) {
-	case 64:
-		return &SymmetricKey{Enc: bytes.Clone(b[:32]), Mac: bytes.Clone(b[32:])}, nil
-	case 32:
-		return &SymmetricKey{Enc: bytes.Clone(b)}, nil
-	default:
-		return nil, fmt.Errorf("%w: unsupported key length %d (v2 encryption keys are not supported)", ErrInvalidKey, len(b))
+	if len(b) != 64 {
+		return nil, fmt.Errorf("%w: unsupported key length %d", ErrInvalidKey, len(b))
 	}
+	return &SymmetricKey{Enc: bytes.Clone(b[:32]), Mac: bytes.Clone(b[32:])}, nil
 }
 
 // GenerateSymmetricKey returns a new random 64-byte AES+HMAC key.
@@ -182,25 +178,12 @@ func aesEncrypt(key *SymmetricKey, plain []byte) (iv, ct, mac []byte, err error)
 	padded := pkcs7Pad(plain)
 	ct = make([]byte, len(padded))
 	cipher.NewCBCEncrypter(block, iv).CryptBlocks(ct, padded)
-	if key.Mac != nil {
-		mac = computeMAC(key.Mac, iv, ct)
-	}
-	return iv, ct, mac, nil
+	return iv, ct, computeMAC(key.Mac, iv, ct), nil
 }
 
-func aesDecrypt(key *SymmetricKey, encType int, iv, ct, mac []byte) ([]byte, error) {
-	switch encType {
-	case 0:
-		if key.Mac != nil {
-			// The official clients refuse to decrypt unauthenticated data with an authenticated key.
-			return nil, ErrMACMismatch
-		}
-	case 2:
-		if key.Mac == nil || !hmac.Equal(mac, computeMAC(key.Mac, iv, ct)) {
-			return nil, ErrMACMismatch
-		}
-	default:
-		return nil, ErrUnsupported
+func aesDecrypt(key *SymmetricKey, iv, ct, mac []byte) ([]byte, error) {
+	if !hmac.Equal(mac, computeMAC(key.Mac, iv, ct)) {
+		return nil, ErrMACMismatch
 	}
 	if len(iv) != aes.BlockSize || len(ct) == 0 || len(ct)%aes.BlockSize != 0 {
 		return nil, ErrInvalidFormat
@@ -217,9 +200,6 @@ func aesDecrypt(key *SymmetricKey, encType int, iv, ct, mac []byte) ([]byte, err
 // EncryptBuffer encrypts binary data (attachments, Send files) into the
 // EncArrayBuffer layout: type(1) | iv(16) | mac(32) | ciphertext.
 func EncryptBuffer(key *SymmetricKey, plain []byte) ([]byte, error) {
-	if key.Mac == nil {
-		return nil, ErrInvalidKey
-	}
 	iv, ct, mac, err := aesEncrypt(key, plain)
 	if err != nil {
 		return nil, err
@@ -236,18 +216,11 @@ func DecryptBuffer(key *SymmetricKey, buf []byte) ([]byte, error) {
 	if len(buf) == 0 {
 		return nil, ErrInvalidFormat
 	}
-	switch buf[0] {
-	case 0:
-		if len(buf) < 18 {
-			return nil, ErrInvalidFormat
-		}
-		return aesDecrypt(key, 0, buf[1:17], buf[17:], nil)
-	case 2:
-		if len(buf) < 50 {
-			return nil, ErrInvalidFormat
-		}
-		return aesDecrypt(key, 2, buf[1:17], buf[49:], buf[17:49])
-	default:
+	if buf[0] != 2 {
 		return nil, ErrUnsupported
 	}
+	if len(buf) < 50 {
+		return nil, ErrInvalidFormat
+	}
+	return aesDecrypt(key, buf[1:17], buf[49:], buf[17:49])
 }

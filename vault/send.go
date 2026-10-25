@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"strings"
 
-	"github.com/yangxiang/bw/internal/crypto"
+	"github.com/oneryx/bw/internal/crypto"
 )
 
 // Send types and auth types.

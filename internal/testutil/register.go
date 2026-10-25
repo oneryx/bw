@@ -3,12 +3,13 @@
 package testutil
 
 import (
+	"context"
 	"encoding/base64"
 	"net/http"
 
-	"github.com/yangxiang/bw/internal/api"
-	"github.com/yangxiang/bw/internal/crypto"
-	"github.com/yangxiang/bw/internal/state"
+	"github.com/oneryx/bw/internal/api"
+	"github.com/oneryx/bw/internal/crypto"
+	"github.com/oneryx/bw/internal/state"
 )
 
 // Register creates an account with PBKDF2 (600k iterations) like a fresh web vault signup.
@@ -34,7 +35,7 @@ func Register(serverURL, email, password string) error {
 	c := &api.Client{Env: state.Environment{Base: serverURL}}
 	// Without SMTP, Vaultwarden returns the verification token directly.
 	var token string
-	if err := c.SendIdentity(http.MethodPost, "/accounts/register/send-verification-email",
+	if err := c.SendIdentity(context.Background(), http.MethodPost, "/accounts/register/send-verification-email",
 		map[string]any{"email": email, "name": "Test User", "receiveMarketingEmails": false}, &token); err != nil {
 		return err
 	}
@@ -51,5 +52,5 @@ func Register(serverURL, email, password string) error {
 		"kdf":           kdf.Type,
 		"kdfIterations": kdf.Iterations,
 	}
-	return c.SendIdentity(http.MethodPost, "/accounts/register/finish", body, nil)
+	return c.SendIdentity(context.Background(), http.MethodPost, "/accounts/register/finish", body, nil)
 }

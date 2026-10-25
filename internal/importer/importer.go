@@ -11,7 +11,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/yangxiang/bw/internal/vault"
+	"github.com/oneryx/bw/vault"
 )
 
 // Folder is an imported folder (ID set when importing a Bitwarden export).
@@ -58,15 +58,8 @@ type factory func(o Options) Importer
 var registry = map[string]factory{
 	"bitwardencsv":  func(o Options) Importer { return &bitwardenCSV{base{o}} },
 	"bitwardenjson": func(o Options) Importer { return &bitwardenJSON{base{o}} },
-	"chromecsv":     func(o Options) Importer { return &chromeCSV{base{o}} },
-	"bravecsv":      func(o Options) Importer { return &chromeCSV{base{o}} },
-	"edgecsv":       func(o Options) Importer { return &chromeCSV{base{o}} },
-	"operacsv":      func(o Options) Importer { return &chromeCSV{base{o}} },
-	"vivaldicsv":    func(o Options) Importer { return &chromeCSV{base{o}} },
-	"firefoxcsv":    func(o Options) Importer { return &firefoxCSV{base{o}} },
 	"keepass2xml":   func(o Options) Importer { return &keepass2XML{base: base{o}} },
 	"keepassxcsv":   func(o Options) Importer { return &keepassxCSV{base{o}} },
-	"lastpasscsv":   func(o Options) Importer { return &lastpassCSV{base{o}} },
 }
 
 // Formats returns the supported format ids, sorted.
@@ -333,4 +326,8 @@ func cardBrand(num *string) *string {
 		return ptr("JCB")
 	}
 	return nil
+}
+
+func fieldOf(t int, name, value string) vault.Field {
+	return vault.Field{Type: t, Name: ptr(name), Value: ptr(value)}
 }

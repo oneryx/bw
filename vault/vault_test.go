@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/yangxiang/bw/internal/output"
+	"github.com/oneryx/bw/internal/output"
 )
 
 func s(v string) *string { return &v }

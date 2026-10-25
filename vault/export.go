@@ -4,7 +4,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/yangxiang/bw/internal/output"
+	"github.com/oneryx/bw/internal/output"
 )
 
 // ExportItem is the decrypted item shape of JSON exports (CipherWithIdExport).

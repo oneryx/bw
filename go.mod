@@ -1,4 +1,4 @@
-module github.com/yangxiang/bw
+module github.com/oneryx/bw
 
 go 1.27.3
 

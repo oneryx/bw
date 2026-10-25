@@ -1,5 +1,5 @@
 VERSION ?= dev
-LDFLAGS := -s -w -X github.com/yangxiang/bw/internal/cli.Version=$(VERSION)
+LDFLAGS := -s -w -X github.com/oneryx/bw/internal/cli.Version=$(VERSION)
 
 .PHONY: build test integration clean
 

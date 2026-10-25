@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/yangxiang/bw/internal/testutil"
+	"github.com/oneryx/bw/internal/testutil"
 )
 
 func main() {

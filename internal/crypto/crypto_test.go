@@ -75,7 +75,8 @@ func TestEncStringParse(t *testing.T) {
 	bad := []string{
 		"2.AAECAw==|Y3Q=|AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
 		"2.AAECAwQFBgcICQoLDA0ODw==|Y3Q=|AAECAw==",
-		"0.AAECAw==|Y3Q=",
+		"0.AAECAwQFBgcICQoLDA0ODw==|Y3Q=",
+		"AAECAwQFBgcICQoLDA0ODw==|Y3Q=|AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
 		"2.!!!!|Y3Q=|AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
 		"8.ABC",
 		"7.ABC|DEF",
